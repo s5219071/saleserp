@@ -597,6 +597,33 @@ h3 {
   gap: 8px;
 }
 
+.import-summary {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+
+.import-summary ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.import-summary li {
+  margin: 3px 0;
+}
+
+.import-summary .success {
+  color: var(--green);
+}
+
+.import-summary .error {
+  color: var(--red);
+}
+
 .compact-list {
   max-height: 260px;
   overflow: auto;

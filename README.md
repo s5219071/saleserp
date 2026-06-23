@@ -19,11 +19,16 @@ dotnet run
 Included:
 
 - HTTP-only cookie authentication and manual HMAC JWT bearer authentication
+- 30-minute access tokens plus 7-day HTTP-only refresh tokens
+- CSRF protection for cookie-based write requests via `X-CSRF-TOKEN`
 - Role authorization for `ADMIN` and `SALES`
+- ADMIN-only user management screen and `/api/users` endpoints
+- EF Core SQLite persistence through `SqliteSalesRepository`
 - Google Maps JavaScript API integration with internal-map fallback
 - ABN checksum validation and mocked ABR lookup-backed CSV/XLSX bulk import
 - Safe sales-note image upload under `wwwroot/uploads/sales-notes`
 - Customer coordinate correction endpoint for drag-and-drop map pins
+- Atomic Customer XML import through `/api/customers/import`
 - Haversine-radius prospect recommendation endpoint
 - Admin postcode/suburb penetration dashboard API
 - SQLite schema and frontend Google Maps integration guide under `Docs`
@@ -35,7 +40,7 @@ Important production changes:
 - Add a browser-restricted Google Maps API key under `GoogleMaps:ApiKey` to enable real Google Maps.
 - Use HTTPS and set auth cookies to `CookieSecurePolicy.Always`.
 - Add CSRF tokens if cookie auth is used for browser write requests.
-- Replace `InMemorySalesRepository` with EF Core or ADO.NET backed by `Docs/schema.sql`.
+- For production, create migrations/backups for the SQLite database or move `ISalesRepository` to SQL Server.
 - Replace `MockAbrLookupClient` with the approved ABR Lookup integration and API key handling.
 
 Google Maps setup:

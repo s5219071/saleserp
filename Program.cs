@@ -1,12 +1,19 @@
+using System.Security.Cryptography;
 using System.Security.Claims;
+using System.Text;
 using System.Text.Json.Serialization;
 using EcnesoftFieldSales.Auth;
 using EcnesoftFieldSales.Domain;
 using EcnesoftFieldSales.Infrastructure;
 using EcnesoftFieldSales.Services;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+const string CsrfHeaderName = "X-CSRF-TOKEN";
+const string RefreshCookieName = "EcnesoftSales.Refresh";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,15 +23,18 @@ builder.Logging.AddDebug();
 
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection("Security"));
+builder.Services.AddAntiforgery(options => options.HeaderName = CsrfHeaderName);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
 
+builder.Services.AddDbContext<SalesDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("SalesDb") ?? "Data Source=App_Data/ecnesoft-sales.db"));
 builder.Services.AddHttpClient<IAbrLookupClient, MockAbrLookupClient>();
 builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
-builder.Services.AddSingleton<ISalesRepository, InMemorySalesRepository>();
+builder.Services.AddScoped<ISalesRepository, SqliteSalesRepository>();
 builder.Services.AddSingleton<IImportParser, ImportParser>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 
@@ -74,6 +84,8 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+await SalesDbInitializer.InitializeAsync(app.Services, app.Configuration);
+
 app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
@@ -113,6 +125,43 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (RequiresCsrfValidation(context))
+    {
+        if (string.IsNullOrWhiteSpace(context.Request.Headers[CsrfHeaderName]))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Missing CSRF token",
+                Detail = $"Send the {CsrfHeaderName} header with cookie-based write requests."
+            });
+            return;
+        }
+
+        try
+        {
+            var antiforgery = context.RequestServices.GetRequiredService<IAntiforgery>();
+            await antiforgery.ValidateRequestAsync(context);
+        }
+        catch (AntiforgeryValidationException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Invalid CSRF token",
+                Detail = "Refresh the page and try again."
+            });
+            return;
+        }
+    }
+
+    await next();
+});
+app.UseAntiforgery();
 app.UseAuthorization();
 
 app.MapPost("/api/auth/login", async (
@@ -120,6 +169,7 @@ app.MapPost("/api/auth/login", async (
         ISalesRepository repository,
         IPasswordHasher passwordHasher,
         IJwtTokenService jwtTokenService,
+        IAntiforgery antiforgery,
         HttpContext httpContext) =>
     {
         if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
@@ -140,6 +190,16 @@ app.MapPost("/api/auth/login", async (
 
         var (token, expiresAt) = jwtTokenService.CreateToken(user);
         var principal = jwtTokenService.CreatePrincipal(user);
+        httpContext.User = principal;
+        var refreshToken = CreateRefreshToken();
+        var refreshTokenExpiresAt = DateTimeOffset.UtcNow.AddDays(7);
+        repository.StoreRefreshToken(new RefreshToken
+        {
+            UserId = user.Id,
+            TokenHash = HashRefreshToken(refreshToken),
+            ExpiresAt = refreshTokenExpiresAt
+        });
+        SetRefreshTokenCookie(httpContext, refreshToken, refreshTokenExpiresAt);
 
         if (request.UseCookie)
         {
@@ -160,7 +220,8 @@ app.MapPost("/api/auth/login", async (
             user.FullName,
             user.Role.ToString(),
             token,
-            expiresAt));
+            expiresAt,
+            CreateCsrfToken(httpContext, antiforgery)));
     })
     .AllowAnonymous();
 
@@ -168,9 +229,79 @@ app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
         Results.Ok(user.ToProfile()))
     .RequireAuthorization("SalesOrAdmin");
 
-app.MapPost("/api/auth/logout", async (HttpContext httpContext) =>
+app.MapPost("/api/auth/refresh", async (
+        HttpContext httpContext,
+        ISalesRepository repository,
+        IJwtTokenService jwtTokenService,
+        IAntiforgery antiforgery) =>
     {
+        var refreshToken = httpContext.Request.Cookies[RefreshCookieName];
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return Results.Unauthorized();
+        }
+
+        var tokenHash = HashRefreshToken(refreshToken);
+        var storedToken = repository.FindActiveRefreshToken(tokenHash);
+        if (storedToken is null)
+        {
+            ClearRefreshTokenCookie(httpContext);
+            return Results.Unauthorized();
+        }
+
+        var user = repository.FindUserById(storedToken.UserId);
+        if (user is null || !user.IsActive)
+        {
+            repository.RevokeRefreshToken(tokenHash);
+            ClearRefreshTokenCookie(httpContext);
+            return Results.Unauthorized();
+        }
+
+        repository.RevokeRefreshToken(tokenHash);
+        var newRefreshToken = CreateRefreshToken();
+        var newRefreshTokenExpiresAt = DateTimeOffset.UtcNow.AddDays(7);
+        repository.StoreRefreshToken(new RefreshToken
+        {
+            UserId = user.Id,
+            TokenHash = HashRefreshToken(newRefreshToken),
+            ExpiresAt = newRefreshTokenExpiresAt
+        });
+        SetRefreshTokenCookie(httpContext, newRefreshToken, newRefreshTokenExpiresAt);
+
+        var (accessToken, expiresAt) = jwtTokenService.CreateToken(user);
+        var principal = jwtTokenService.CreatePrincipal(user);
+        httpContext.User = principal;
+        await httpContext.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            principal,
+            new AuthenticationProperties
+            {
+                IsPersistent = true,
+                ExpiresUtc = expiresAt,
+                AllowRefresh = true
+            });
+
+        return Results.Ok(new LoginResponse(
+            user.Id,
+            user.Email,
+            user.FullName,
+            user.Role.ToString(),
+            accessToken,
+            expiresAt,
+            CreateCsrfToken(httpContext, antiforgery)));
+    })
+    .AllowAnonymous();
+
+app.MapPost("/api/auth/logout", async (HttpContext httpContext, ISalesRepository repository) =>
+    {
+        var refreshToken = httpContext.Request.Cookies[RefreshCookieName];
+        if (!string.IsNullOrWhiteSpace(refreshToken))
+        {
+            repository.RevokeRefreshToken(HashRefreshToken(refreshToken));
+        }
+
         await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        ClearRefreshTokenCookie(httpContext);
         return Results.NoContent();
     })
     .RequireAuthorization("SalesOrAdmin");
@@ -220,6 +351,81 @@ app.MapGet("/api/users/sales", (ISalesRepository repository) =>
             .Select(user => new UserProfileResponse(user.Id, user.Email, user.FullName, user.Role.ToString()))))
     .RequireAuthorization("AdminOnly");
 
+app.MapGet("/api/users", (ISalesRepository repository) =>
+        Results.Ok(repository.GetUsers().Select(UserAccountDto.From)))
+    .RequireAuthorization("AdminOnly");
+
+app.MapPost("/api/users", (
+        CreateUserRequest request,
+        ISalesRepository repository,
+        IPasswordHasher passwordHasher) =>
+    {
+        var validation = ValidateCreateUserRequest(request, repository);
+        if (validation.Count > 0)
+        {
+            return Results.ValidationProblem(validation);
+        }
+
+        var password = passwordHasher.HashPassword(request.Password);
+        var user = repository.AddUser(new UserAccount
+        {
+            Email = request.Email.Trim(),
+            FullName = request.FullName.Trim(),
+            PasswordHash = password.Hash,
+            Salt = password.Salt,
+            Role = Enum.Parse<UserRole>(request.Role, ignoreCase: true),
+            IsActive = request.IsActive
+        });
+
+        return Results.Created($"/api/users/{user.Id}", UserAccountDto.From(user));
+    })
+    .RequireAuthorization("AdminOnly");
+
+app.MapPut("/api/users/{id:int}", (
+        int id,
+        UpdateUserRequest request,
+        ISalesRepository repository,
+        IPasswordHasher passwordHasher) =>
+    {
+        var existing = repository.FindUserById(id);
+        if (existing is null)
+        {
+            return Results.NotFound();
+        }
+
+        var validation = ValidateUpdateUserRequest(id, request, repository);
+        if (validation.Count > 0)
+        {
+            return Results.ValidationProblem(validation);
+        }
+
+        string? passwordHash = null;
+        string? salt = null;
+        if (!string.IsNullOrWhiteSpace(request.Password))
+        {
+            var password = passwordHasher.HashPassword(request.Password);
+            passwordHash = password.Hash;
+            salt = password.Salt;
+        }
+
+        var updated = repository.UpdateUser(id, new UserAccount
+        {
+            Email = string.IsNullOrWhiteSpace(request.Email) ? existing.Email : request.Email.Trim(),
+            FullName = string.IsNullOrWhiteSpace(request.FullName) ? existing.FullName : request.FullName.Trim(),
+            Role = string.IsNullOrWhiteSpace(request.Role)
+                ? existing.Role
+                : Enum.Parse<UserRole>(request.Role, ignoreCase: true),
+            IsActive = request.IsActive ?? existing.IsActive
+        }, passwordHash, salt);
+
+        return updated is null ? Results.NotFound() : Results.Ok(UserAccountDto.From(updated));
+    })
+    .RequireAuthorization("AdminOnly");
+
+app.MapDelete("/api/users/{id:int}", (int id, ISalesRepository repository) =>
+        repository.DeactivateUser(id) ? Results.NoContent() : Results.NotFound())
+    .RequireAuthorization("AdminOnly");
+
 app.MapGet("/api/customers", (
         ClaimsPrincipal user,
         ISalesRepository repository,
@@ -252,30 +458,7 @@ app.MapPost("/api/customers", (
             return Results.ValidationProblem(validation);
         }
 
-        var type = Enum.Parse<CustomerLifecycleType>(request.Type!, ignoreCase: true);
-        var competitor = ParseCompetitor(request.Competitor);
-        var assignedUserId = user.IsInRole("ADMIN") ? request.AssignedUserId : user.GetUserId();
-
-        var customer = repository.AddCustomer(new Customer
-        {
-            CompanyName = request.CompanyName.Trim(),
-            ABN = AbnValidator.Normalize(request.ABN),
-            Address = request.Address.Trim(),
-            City = request.City.Trim(),
-            State = request.State.Trim().ToUpperInvariant(),
-            Postcode = request.Postcode.Trim(),
-            Phone = request.Phone?.Trim(),
-            Email = request.Email?.Trim(),
-            Latitude = request.Latitude,
-            Longitude = request.Longitude,
-            Type = type,
-            TerminationDate = type == CustomerLifecycleType.TERMINATION ? request.TerminationDate : null,
-            TerminationReason = type == CustomerLifecycleType.TERMINATION ? request.TerminationReason?.Trim() : null,
-            Competitor = competitor,
-            GeneralNote = EmptyToNull(request.GeneralNote),
-            GroupId = request.GroupId,
-            AssignedUserId = assignedUserId
-        });
+        var customer = repository.AddCustomer(BuildCustomerFromRequest(request, user));
 
         return Results.Created($"/api/customers/{customer.Id}", CustomerDto.From(
             customer,
@@ -296,30 +479,7 @@ app.MapPut("/api/customers/{id:int}", (
             return Results.ValidationProblem(validation);
         }
 
-        var type = Enum.Parse<CustomerLifecycleType>(request.Type!, ignoreCase: true);
-        var competitor = ParseCompetitor(request.Competitor);
-        var assignedUserId = user.IsInRole("ADMIN") ? request.AssignedUserId : user.GetUserId();
-
-        var customer = repository.UpdateCustomer(id, new Customer
-        {
-            CompanyName = request.CompanyName.Trim(),
-            ABN = AbnValidator.Normalize(request.ABN),
-            Address = request.Address.Trim(),
-            City = request.City.Trim(),
-            State = request.State.Trim().ToUpperInvariant(),
-            Postcode = request.Postcode.Trim(),
-            Phone = request.Phone?.Trim(),
-            Email = request.Email?.Trim(),
-            Latitude = request.Latitude,
-            Longitude = request.Longitude,
-            Type = type,
-            TerminationDate = type == CustomerLifecycleType.TERMINATION ? request.TerminationDate : null,
-            TerminationReason = type == CustomerLifecycleType.TERMINATION ? request.TerminationReason?.Trim() : null,
-            Competitor = competitor,
-            GeneralNote = EmptyToNull(request.GeneralNote),
-            GroupId = request.GroupId,
-            AssignedUserId = assignedUserId
-        }, user);
+        var customer = repository.UpdateCustomer(id, BuildCustomerFromRequest(request, user), user);
 
         return customer is null
             ? Results.NotFound()
@@ -336,6 +496,59 @@ app.MapDelete("/api/customers", (
     {
         var deleted = repository.ClearCustomers(user);
         return Results.Ok(new { deleted });
+    })
+    .RequireAuthorization("SalesOrAdmin");
+
+app.MapPost("/api/customers/import", (
+        CustomerXmlImportRequest request,
+        ClaimsPrincipal user,
+        ISalesRepository repository) =>
+    {
+        IReadOnlyList<CreateCustomerRequest> rows = request.Customers ?? [];
+        var errors = new List<CustomerXmlImportRowResult>();
+        var customers = new List<Customer>();
+
+        for (var index = 0; index < rows.Count; index += 1)
+        {
+            var rowNumber = index + 2;
+            var row = rows[index];
+            var validation = ValidateCustomerRequest(row);
+            if (validation.Count > 0)
+            {
+                errors.Add(new CustomerXmlImportRowResult(
+                    rowNumber,
+                    false,
+                    null,
+                    row.CompanyName,
+                    string.Join(" ", validation.Values.SelectMany(value => value))));
+                continue;
+            }
+
+            customers.Add(BuildCustomerFromRequest(row, user));
+        }
+
+        if (errors.Count > 0)
+        {
+            return Results.BadRequest(new CustomerXmlImportResponse(
+                rows.Count,
+                0,
+                0,
+                false,
+                errors));
+        }
+
+        if (customers.Count == 0)
+        {
+            return Results.BadRequest(new CustomerXmlImportResponse(
+                rows.Count,
+                0,
+                0,
+                false,
+                [new CustomerXmlImportRowResult(2, false, null, "", "No valid customer rows were found.")]));
+        }
+
+        var result = repository.ReplaceCustomers(user, customers);
+        return Results.Ok(result);
     })
     .RequireAuthorization("SalesOrAdmin");
 
@@ -680,6 +893,31 @@ static IResult SaveHappyVisitGroup(
     return Results.Ok(HappyVisitGroupDto.From(saved));
 }
 
+static Customer BuildCustomerFromRequest(CreateCustomerRequest request, ClaimsPrincipal user)
+{
+    var type = Enum.Parse<CustomerLifecycleType>(request.Type!, ignoreCase: true);
+    return new Customer
+    {
+        CompanyName = request.CompanyName.Trim(),
+        ABN = AbnValidator.Normalize(request.ABN),
+        Address = request.Address.Trim(),
+        City = request.City.Trim(),
+        State = request.State.Trim().ToUpperInvariant(),
+        Postcode = request.Postcode.Trim(),
+        Phone = request.Phone?.Trim(),
+        Email = request.Email?.Trim(),
+        Latitude = request.Latitude,
+        Longitude = request.Longitude,
+        Type = type,
+        TerminationDate = type == CustomerLifecycleType.TERMINATION ? request.TerminationDate : null,
+        TerminationReason = type == CustomerLifecycleType.TERMINATION ? request.TerminationReason?.Trim() : null,
+        Competitor = ParseCompetitor(request.Competitor),
+        GeneralNote = EmptyToNull(request.GeneralNote),
+        GroupId = request.GroupId,
+        AssignedUserId = user.IsInRole("ADMIN") ? request.AssignedUserId : user.GetUserId()
+    };
+}
+
 static Dictionary<string, string[]> ValidateCustomerRequest(CreateCustomerRequest request)
 {
     var errors = new Dictionary<string, string[]>();
@@ -765,6 +1003,110 @@ static Dictionary<string, string[]> ValidateDashboardPost(
     }
 
     return errors;
+}
+
+static Dictionary<string, string[]> ValidateCreateUserRequest(CreateUserRequest request, ISalesRepository repository)
+{
+    var errors = new Dictionary<string, string[]>();
+    if (string.IsNullOrWhiteSpace(request.Email))
+    {
+        errors["email"] = ["Username is required."];
+    }
+    else if (repository.GetUsers().Any(user => user.Email.Equals(request.Email.Trim(), StringComparison.OrdinalIgnoreCase)))
+    {
+        errors["email"] = ["Username already exists."];
+    }
+
+    if (string.IsNullOrWhiteSpace(request.FullName))
+    {
+        errors["fullName"] = ["Full name is required."];
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Password) || request.Password.Length < 8)
+    {
+        errors["password"] = ["Password must be at least 8 characters."];
+    }
+
+    if (!Enum.TryParse<UserRole>(request.Role, ignoreCase: true, out _))
+    {
+        errors["role"] = ["Role must be ADMIN or SALES."];
+    }
+
+    return errors;
+}
+
+static Dictionary<string, string[]> ValidateUpdateUserRequest(int userId, UpdateUserRequest request, ISalesRepository repository)
+{
+    var errors = new Dictionary<string, string[]>();
+    if (!string.IsNullOrWhiteSpace(request.Email) &&
+        repository.GetUsers().Any(user =>
+            user.Id != userId &&
+            user.Email.Equals(request.Email.Trim(), StringComparison.OrdinalIgnoreCase)))
+    {
+        errors["email"] = ["Username already exists."];
+    }
+
+    if (!string.IsNullOrWhiteSpace(request.Password) && request.Password.Length < 8)
+    {
+        errors["password"] = ["Password must be at least 8 characters."];
+    }
+
+    if (!string.IsNullOrWhiteSpace(request.Role) &&
+        !Enum.TryParse<UserRole>(request.Role, ignoreCase: true, out _))
+    {
+        errors["role"] = ["Role must be ADMIN or SALES."];
+    }
+
+    return errors;
+}
+
+static bool RequiresCsrfValidation(HttpContext context)
+{
+    if (!context.Request.Path.StartsWithSegments("/api") ||
+        HttpMethods.IsGet(context.Request.Method) ||
+        HttpMethods.IsHead(context.Request.Method) ||
+        HttpMethods.IsOptions(context.Request.Method) ||
+        context.Request.Path.StartsWithSegments("/api/auth/login") ||
+        context.Request.Path.StartsWithSegments("/api/auth/refresh"))
+    {
+        return false;
+    }
+
+    var authorization = context.Request.Headers.Authorization.ToString();
+    return !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase);
+}
+
+static string CreateCsrfToken(HttpContext httpContext, IAntiforgery antiforgery) =>
+    antiforgery.GetAndStoreTokens(httpContext).RequestToken ?? "";
+
+static string CreateRefreshToken() =>
+    Convert.ToBase64String(RandomNumberGenerator.GetBytes(64))
+        .TrimEnd('=')
+        .Replace('+', '-')
+        .Replace('/', '_');
+
+static string HashRefreshToken(string refreshToken) =>
+    Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(refreshToken)));
+
+static void SetRefreshTokenCookie(HttpContext httpContext, string refreshToken, DateTimeOffset expiresAt)
+{
+    httpContext.Response.Cookies.Append("EcnesoftSales.Refresh", refreshToken, new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Lax,
+        Secure = httpContext.Request.IsHttps,
+        Expires = expiresAt
+    });
+}
+
+static void ClearRefreshTokenCookie(HttpContext httpContext)
+{
+    httpContext.Response.Cookies.Delete("EcnesoftSales.Refresh", new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Lax,
+        Secure = httpContext.Request.IsHttps
+    });
 }
 
 static CustomerType ParseCustomerTypeOrDefault(string? value, CustomerType fallback) =>

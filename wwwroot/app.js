@@ -1,11 +1,14 @@
 const state = {
   token: localStorage.getItem("ecnesoft.sales.token") || "",
+  csrfToken: sessionStorage.getItem("ecnesoft.sales.csrf") || "",
   user: null,
+  users: [],
   customers: [],
   happyGroups: [],
   posts: [],
   selectedCustomerId: null,
   editingCustomerId: null,
+  editingUserId: null,
   editingPostId: null,
   dragging: null,
   map: {
@@ -149,6 +152,10 @@ function bindEvents() {
   $("#postForm").addEventListener("submit", savePost);
   $("#exportCustomerTemplateButton").addEventListener("click", exportCustomerXmlTemplate);
   $("#importCustomerXmlInput").addEventListener("change", importCustomerXml);
+  $("#addUserButton").addEventListener("click", () => openUserModal());
+  $("#closeUserModalButton").addEventListener("click", closeUserModal);
+  $("#cancelUserButton").addEventListener("click", closeUserModal);
+  $("#userForm").addEventListener("submit", saveUser);
   $("#zoomInButton").addEventListener("click", zoomIn);
   $("#zoomOutButton").addEventListener("click", zoomOut);
   $("#resetMapButton").addEventListener("click", resetMap);
@@ -236,8 +243,11 @@ function colorSwatch(color) {
 
 async function resumeSession() {
   if (!state.token) {
-    showLogin();
-    return;
+    const refreshed = await refreshSession();
+    if (!refreshed) {
+      showLogin();
+      return;
+    }
   }
 
   try {
@@ -246,6 +256,8 @@ async function resumeSession() {
   } catch {
     localStorage.removeItem("ecnesoft.sales.token");
     state.token = "";
+    state.csrfToken = "";
+    sessionStorage.removeItem("ecnesoft.sales.csrf");
     showLogin();
   }
 }
@@ -271,14 +283,7 @@ async function login(event) {
     }
 
     const data = await response.json();
-    state.token = data.token;
-    state.user = {
-      id: data.id,
-      email: data.email,
-      fullName: data.fullName,
-      role: data.role
-    };
-    localStorage.setItem("ecnesoft.sales.token", state.token);
+    applyAuthResponse(data);
     await enterApp();
   } catch {
     $("#loginError").textContent = "Please check the login ID and password.";
@@ -290,8 +295,11 @@ async function logout() {
     await api("/api/auth/logout", { method: "POST" });
   } finally {
     localStorage.removeItem("ecnesoft.sales.token");
+    sessionStorage.removeItem("ecnesoft.sales.csrf");
     state.token = "";
+    state.csrfToken = "";
     state.user = null;
+    state.users = [];
     showLogin();
   }
 }
@@ -301,9 +309,15 @@ async function enterApp() {
   $("#appView").hidden = false;
   $("#userName").textContent = state.user.fullName;
   $("#userRole").textContent = state.user.role;
+  $("#usersNavButton").hidden = state.user.role !== "ADMIN";
 
   await initializeMapProvider();
-  await Promise.all([loadCustomers(), loadHappyGroups(), loadPosts()]);
+  await Promise.all([
+    loadCustomers(),
+    loadHappyGroups(),
+    loadPosts(),
+    state.user.role === "ADMIN" ? loadUsers() : Promise.resolve()
+  ]);
   renderAll();
   if (!state.google.enabled) {
     positionMapLabels();
@@ -331,15 +345,57 @@ function showView(viewId) {
   if (viewId === "customerView") {
     renderCustomerTable();
   }
+  if (viewId === "usersView") {
+    renderUsers();
+  }
 }
 
-async function api(url, options = {}) {
+function applyAuthResponse(data) {
+  state.token = data.token;
+  state.csrfToken = data.csrfToken || "";
+  state.user = {
+    id: data.id,
+    email: data.email,
+    fullName: data.fullName,
+    role: data.role
+  };
+  localStorage.setItem("ecnesoft.sales.token", state.token);
+  if (state.csrfToken) {
+    sessionStorage.setItem("ecnesoft.sales.csrf", state.csrfToken);
+  }
+}
+
+async function refreshSession() {
+  try {
+    const response = await fetch("/api/auth/refresh", {
+      method: "POST",
+      credentials: "include"
+    });
+    if (!response.ok) {
+      return false;
+    }
+
+    applyAuthResponse(await response.json());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isMutation(method) {
+  return ["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "GET").toUpperCase());
+}
+
+async function api(url, options = {}, retryOnUnauthorized = true) {
   const headers = new Headers(options.headers || {});
   if (!(options.body instanceof FormData) && options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   if (state.token) {
     headers.set("Authorization", `Bearer ${state.token}`);
+  }
+  if (state.csrfToken && isMutation(options.method)) {
+    headers.set("X-CSRF-TOKEN", state.csrfToken);
   }
 
   const response = await fetch(url, {
@@ -349,6 +405,9 @@ async function api(url, options = {}) {
   });
 
   if (response.status === 401) {
+    if (retryOnUnauthorized && url !== "/api/auth/refresh" && await refreshSession()) {
+      return api(url, options, false);
+    }
     throw new Error("Please login again.");
   }
   if (response.status === 403) {
@@ -356,13 +415,16 @@ async function api(url, options = {}) {
   }
   if (!response.ok) {
     let message = response.statusText;
+    let problem = null;
     try {
-      const problem = await response.json();
+      problem = await response.json();
       message = flattenProblem(problem) || message;
     } catch {
       message = await response.text();
     }
-    throw new Error(message || "Request failed.");
+    const error = new Error(message || "Request failed.");
+    error.details = problem;
+    throw error;
   }
   if (response.status === 204) {
     return null;
@@ -484,6 +546,15 @@ async function loadPosts() {
   state.posts = await api("/api/dashboard/posts");
 }
 
+async function loadUsers() {
+  if (state.user?.role !== "ADMIN") {
+    state.users = [];
+    return;
+  }
+
+  state.users = await api("/api/users");
+}
+
 function renderAll() {
   renderSummary();
   renderFilterCustomerList();
@@ -492,6 +563,7 @@ function renderAll() {
   renderHappyVisit();
   renderPosts();
   renderCustomerTable();
+  renderUsers();
 }
 
 function renderSummary() {
@@ -562,6 +634,61 @@ function renderCustomerTable() {
     row.append(details, actions);
     table.append(row);
   });
+}
+
+function renderUsers() {
+  const table = $("#usersTable");
+  if (!table) {
+    return;
+  }
+
+  table.replaceChildren();
+  if (state.user?.role !== "ADMIN") {
+    table.append(emptyState("ADMIN only."));
+    return;
+  }
+
+  if (state.users.length === 0) {
+    table.append(emptyState("No users found."));
+    return;
+  }
+
+  state.users.forEach((user) => {
+    const row = document.createElement("article");
+    row.className = "customer-card";
+    const details = document.createElement("div");
+    details.className = "customer-card-details";
+    details.innerHTML = `
+      <strong>${escapeHtml(user.fullName)}</strong>
+      <span>${escapeHtml(user.email)}</span>
+      <small>${escapeHtml(user.role)} | ${user.isActive ? "Active" : "Inactive"}</small>
+    `;
+
+    const actions = document.createElement("div");
+    actions.className = "customer-card-actions";
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.textContent = "Edit";
+    editButton.addEventListener("click", () => openUserModal(user.id));
+
+    const deactivateButton = document.createElement("button");
+    deactivateButton.type = "button";
+    deactivateButton.className = "light-button";
+    deactivateButton.textContent = "Deactivate";
+    deactivateButton.disabled = !user.isActive || user.id === state.user.id;
+    deactivateButton.addEventListener("click", () => deactivateUser(user.id));
+
+    actions.append(editButton, deactivateButton);
+    row.append(details, actions);
+    table.append(row);
+  });
+}
+
+function emptyState(message) {
+  const empty = document.createElement("div");
+  empty.className = "empty-state";
+  empty.textContent = message;
+  return empty;
 }
 
 function customerRow(customer) {
@@ -850,6 +977,85 @@ function closeNewCustomerModal() {
   $("#newCustomerModal").hidden = true;
   clearTimeout(state.addressPreviewTimer);
   clearAddressPreviewMarker();
+}
+
+function openUserModal(userId = null) {
+  state.editingUserId = userId;
+  const form = $("#userForm");
+  form.reset();
+  const user = userId ? state.users.find((item) => item.id === userId) : null;
+  $("#userModalTitle").textContent = user ? "Edit User" : "Add User";
+  $("#userSubmitButton").textContent = user ? "Save User" : "Add User";
+  $("#userPasswordHelp").textContent = user ? "Leave blank to keep the current password." : "Minimum 8 characters.";
+  form.elements.password.required = !user;
+  if (user) {
+    form.elements.email.value = user.email;
+    form.elements.fullName.value = user.fullName;
+    form.elements.role.value = user.role;
+    form.elements.isActive.checked = user.isActive;
+  } else {
+    form.elements.role.value = "SALES";
+    form.elements.isActive.checked = true;
+  }
+
+  $("#userStatus").textContent = "";
+  $("#userModal").hidden = false;
+  form.elements.email.focus();
+}
+
+function closeUserModal() {
+  $("#userModal").hidden = true;
+  state.editingUserId = null;
+}
+
+async function saveUser(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const isEditing = Boolean(state.editingUserId);
+  const payload = {
+    email: String(data.get("email") || "").trim(),
+    password: String(data.get("password") || ""),
+    fullName: String(data.get("fullName") || "").trim(),
+    role: String(data.get("role") || "SALES"),
+    isActive: form.elements.isActive.checked
+  };
+
+  if (isEditing && !payload.password) {
+    delete payload.password;
+  }
+
+  try {
+    $("#userSubmitButton").disabled = true;
+    await api(isEditing ? `/api/users/${state.editingUserId}` : "/api/users", {
+      method: isEditing ? "PUT" : "POST",
+      body: JSON.stringify(payload)
+    });
+    await loadUsers();
+    renderUsers();
+    closeUserModal();
+    setStatus(isEditing ? "User updated" : "User created");
+  } catch (error) {
+    $("#userStatus").textContent = error.message;
+  } finally {
+    $("#userSubmitButton").disabled = false;
+  }
+}
+
+async function deactivateUser(userId) {
+  const user = state.users.find((item) => item.id === userId);
+  if (!user || !confirm(`Deactivate "${user.email}"?`)) {
+    return;
+  }
+
+  try {
+    await api(`/api/users/${userId}`, { method: "DELETE" });
+    await loadUsers();
+    renderUsers();
+    setStatus("User deactivated");
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
 function toggleTerminationFields() {
@@ -1573,6 +1779,7 @@ async function importCustomerXml(event) {
   }
 
   setStatus("Importing customer XML...");
+  setImportSummary(null);
   try {
     const records = parseCustomerImportXml(await file.text());
     const payloads = [];
@@ -1581,7 +1788,7 @@ async function importCustomerXml(event) {
       try {
         payloads.push(buildCustomerImportPayload(record, index + 2));
       } catch (error) {
-        validationErrors.push(`Row ${index + 2}: ${error.message}`);
+        validationErrors.push({ rowNumber: index + 2, message: error.message });
       }
     });
 
@@ -1589,27 +1796,24 @@ async function importCustomerXml(event) {
       throw new Error("No valid customer rows were found in the XML file.");
     }
     if (validationErrors.length > 0) {
-      throw new Error(`Import cancelled. ${validationErrors.slice(0, 3).join(" ")}`);
+      setImportSummary({
+        committed: false,
+        rows: validationErrors.map((error) => ({
+          rowNumber: error.rowNumber,
+          success: false,
+          companyName: "",
+          error: error.message
+        }))
+      });
+      throw new Error(`Import cancelled. ${validationErrors.length} row error${validationErrors.length === 1 ? "" : "s"} found.`);
     }
 
-    let inserted = 0;
-    const errors = [];
     const importedTypes = new Set();
-
-    const clearResult = await api("/api/customers", { method: "DELETE" });
-    for (let index = 0; index < payloads.length; index += 1) {
-      try {
-        const payload = payloads[index];
-        await api("/api/customers", {
-          method: "POST",
-          body: JSON.stringify(payload)
-        });
-        inserted += 1;
-        importedTypes.add(payload.type);
-      } catch (error) {
-        errors.push(`Row ${index + 1}: ${error.message}`);
-      }
-    }
+    payloads.forEach((payload) => importedTypes.add(payload.type));
+    const result = await api("/api/customers/import", {
+      method: "POST",
+      body: JSON.stringify({ customers: payloads })
+    });
 
     await loadCustomers();
     importedTypes.forEach((type) => state.customerFilters.types.add(type));
@@ -1617,15 +1821,47 @@ async function importCustomerXml(event) {
     renderAll();
     renderCustomerTable();
     showView("customerView");
-    const summary = `${inserted} customer${inserted === 1 ? "" : "s"} imported`;
-    setStatus(errors.length
-      ? `${summary}. ${clearResult.deleted || 0} old customers deleted. ${errors.slice(0, 3).join(" ")}`
-      : `${summary}. ${clearResult.deleted || 0} old customers deleted.`);
+    setImportSummary(result);
+    setStatus(`${result.inserted} customer${result.inserted === 1 ? "" : "s"} imported. ${result.deleted} old customer${result.deleted === 1 ? "" : "s"} deleted.`);
   } catch (error) {
+    if (error.details?.rows) {
+      setImportSummary(error.details);
+    }
     setStatus(error.message || "XML import failed.");
   } finally {
     input.value = "";
   }
+}
+
+function setImportSummary(result) {
+  const container = $("#customerImportSummary");
+  if (!container) {
+    return;
+  }
+
+  container.replaceChildren();
+  if (!result) {
+    container.hidden = true;
+    return;
+  }
+
+  container.hidden = false;
+  const heading = document.createElement("strong");
+  heading.textContent = result.committed
+    ? `Import committed: ${result.inserted || 0} row${result.inserted === 1 ? "" : "s"} saved`
+    : "Import cancelled: no existing customers were changed";
+  container.append(heading);
+
+  const list = document.createElement("ul");
+  (result.rows || []).forEach((row) => {
+    const item = document.createElement("li");
+    item.className = row.success ? "success" : "error";
+    item.textContent = row.success
+      ? `Row ${row.rowNumber}: saved ${row.companyName || `customer #${row.customerId}`}`
+      : `Row ${row.rowNumber}: ${row.error || "Could not import row"}`;
+    list.append(item);
+  });
+  container.append(list);
 }
 
 function syncCustomerTypeFilterInputs() {

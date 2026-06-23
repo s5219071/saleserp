@@ -12,7 +12,7 @@ public sealed class JwtOptions
     public string Issuer { get; init; } = "EcnesoftFieldSales";
     public string Audience { get; init; } = "EcnesoftSalesWeb";
     public string SigningKey { get; init; } = "";
-    public int AccessTokenMinutes { get; init; } = 480;
+    public int AccessTokenMinutes { get; init; } = 30;
 }
 
 public interface IJwtTokenService

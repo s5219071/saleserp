@@ -2,6 +2,20 @@
 
 이 문서는 ECNESOFT Field Sales 프로젝트를 유지보수하거나 확장하는 개발자를 위한 개발 문서입니다.
 
+## 0. Current Architecture Snapshot
+
+2026-06-23 기준 주요 구조:
+
+- Storage: `InMemorySalesRepository` 대신 EF Core SQLite 기반 `SqliteSalesRepository`를 사용합니다.
+- DB bootstrap: 앱 시작 시 `SalesDbInitializer`가 SQLite 파일과 기본 ADMIN/SALES 계정, 기본 ClientGroups를 생성합니다.
+- Connection string: `appsettings.json`의 `ConnectionStrings:SalesDb`를 사용합니다.
+- Auth: 로그인 시 30분 access token과 7일 refresh token을 발급합니다.
+- Refresh token: HTTP-only cookie `EcnesoftSales.Refresh`로 저장하고, DB에는 SHA-256 hash만 저장합니다.
+- CSRF: cookie 기반 POST/PUT/PATCH/DELETE 요청은 `X-CSRF-TOKEN` header를 검증합니다. Bearer JWT API client는 기존 방식 그대로 사용할 수 있습니다.
+- User Management: ADMIN 전용 `Users` 화면과 `/api/users` CRUD endpoint가 있습니다.
+- XML Import: `/api/customers/import`가 모든 row를 검증한 뒤 하나의 DB transaction으로 기존 customer를 교체합니다. 실패 시 기존 customer 데이터는 유지됩니다.
+- Schema reference: `Docs/schema.sql`은 현재 EF Core SQLite 모델 기준으로 갱신되어 있습니다.
+
 ## 1. 프로젝트 개요
 
 `saleserp`는 호주 Sydney 시장을 기준으로 만든 웹 기반 B2B 필드 세일즈 관리 시스템입니다.
@@ -31,7 +45,7 @@
 - Frontend: HTML, CSS, Vanilla JavaScript
 - Auth: Cookie Authentication, custom HMAC JWT Authentication
 - Map: Google Maps JavaScript API, internal SVG map fallback
-- Storage: 현재 In-memory repository
+- Storage: EF Core SQLite repository (`SqliteSalesRepository`)
 - Schema reference: SQLite/SQL Server 스타일 SQL 문서 제공
 - Import: CSV/XLSX parser, XML Spreadsheet import on frontend
 
@@ -123,11 +137,14 @@ PW: Ecnesoft
 
 ```json
 {
+  "ConnectionStrings": {
+    "SalesDb": "Data Source=App_Data/ecnesoft-sales.db"
+  },
   "Jwt": {
     "Issuer": "EcnesoftFieldSales",
     "Audience": "EcnesoftSalesWeb",
     "SigningKey": "CHANGE_ME_TO_A_64_BYTE_SECRET_IN_PRODUCTION_2026",
-    "AccessTokenMinutes": 480
+    "AccessTokenMinutes": 30
   },
   "Security": {
     "MaxUploadBytes": 5242880
@@ -200,6 +217,7 @@ CompetitorType:
 | Method | Path | Role | Description |
 |---|---|---|---|
 | POST | `/api/auth/login` | Public | 로그인 |
+| POST | `/api/auth/refresh` | Public + refresh cookie | access token 재발급 |
 | GET | `/api/auth/me` | ADMIN, SALES | 현재 사용자 |
 | POST | `/api/auth/logout` | ADMIN, SALES | 로그아웃 |
 
@@ -209,6 +227,7 @@ CompetitorType:
 |---|---|---|---|
 | GET | `/api/customers` | ADMIN, SALES | 고객 목록 |
 | POST | `/api/customers` | ADMIN, SALES | 고객 생성 |
+| POST | `/api/customers/import` | ADMIN, SALES | XML Import atomic 교체 |
 | PUT | `/api/customers/{id}` | ADMIN, SALES | 고객 수정 |
 | DELETE | `/api/customers` | ADMIN, SALES | XML Import 교체용 고객 전체 삭제 |
 | PATCH | `/api/customers/{id}/coordinates` | ADMIN, SALES | 좌표 수정 |
@@ -266,7 +285,11 @@ CompetitorType:
 
 | Method | Path | Role | Description |
 |---|---|---|---|
+| GET | `/api/users` | ADMIN | 사용자 전체 목록 |
 | GET | `/api/users/sales` | ADMIN | 영업사원 목록 |
+| POST | `/api/users` | ADMIN | 사용자 생성 |
+| PUT | `/api/users/{id}` | ADMIN | 사용자 수정 |
+| DELETE | `/api/users/{id}` | ADMIN | 사용자 비활성화 |
 | POST | `/api/admin/import` | ADMIN | ABN CSV/XLSX Bulk Import |
 | GET | `/api/admin/dashboard/penetration` | ADMIN | 침투율 Dashboard |
 
@@ -421,13 +444,12 @@ Import 동작:
 
 - XML 파일을 브라우저에서 읽습니다.
 - XML 전체 row를 먼저 파싱/검증합니다.
-- 검증 성공 시 기존 Customer 데이터를 삭제합니다.
-- 각 row를 `/api/customers`로 등록합니다.
+- 프론트엔드는 모든 row를 `/api/customers/import`로 한 번에 보냅니다.
+- 백엔드는 모든 row를 다시 검증한 뒤 하나의 DB transaction에서 기존 Customer 데이터를 삭제하고 새 Customer를 저장합니다.
 - Import 완료 후에는 XML에 있는 새 Customer 데이터만 남습니다.
 - 성공한 고객의 Type 필터가 Customer 화면에서 자동 체크됩니다.
-- XML 검증 단계에서 오류가 있으면 기존 Customer 데이터는 삭제하지 않습니다.
-- 기존 데이터 삭제 이후 서버 저장 단계에서 일부 row가 실패하면 성공한 row만 남을 수 있으므로 status message를 확인해야 합니다.
-- 오류는 status message에 최대 3개까지 요약 표시합니다.
+- XML 검증 또는 서버 저장 중 오류가 있으면 transaction이 commit되지 않으므로 기존 Customer 데이터는 유지됩니다.
+- Import 결과는 row별 성공/실패 summary로 표시합니다.
 
 주의:
 

@@ -9,6 +9,9 @@ public interface ISalesRepository
     UserAccount? FindUserByLogin(string email);
     UserAccount? FindUserById(int? id);
     IReadOnlyList<UserAccount> GetUsers();
+    UserAccount AddUser(UserAccount user);
+    UserAccount? UpdateUser(int id, UserAccount user, string? passwordHash, string? salt);
+    bool DeactivateUser(int id);
     IReadOnlyList<ClientGroup> GetGroups();
     ClientGroup? FindGroup(int? id);
     IReadOnlyList<Customer> GetCustomers(ClaimsPrincipal principal, string? customerType, string? prospectStatus, int? groupId);
@@ -16,6 +19,7 @@ public interface ISalesRepository
     Customer AddCustomer(Customer customer);
     Customer? UpdateCustomer(int id, Customer customer, ClaimsPrincipal principal);
     int ClearCustomers(ClaimsPrincipal principal);
+    CustomerXmlImportResponse ReplaceCustomers(ClaimsPrincipal principal, IReadOnlyList<Customer> customers);
     (Customer Customer, bool WasUpdated) UpsertCustomerByAbn(Customer customer);
     bool UpdateCoordinates(int id, double latitude, double longitude, ClaimsPrincipal principal);
     SalesNote AddSalesNote(SalesNote note);
@@ -29,6 +33,10 @@ public interface ISalesRepository
     DashboardPost AddDashboardPost(DashboardPost post);
     DashboardPost? UpdateDashboardPost(int id, DashboardPost post, IReadOnlyList<string>? replacementImagePaths);
     bool DeleteDashboardPost(int id);
+    void StoreRefreshToken(RefreshToken token);
+    RefreshToken? FindActiveRefreshToken(string tokenHash);
+    void RevokeRefreshToken(string tokenHash);
+    void RevokeRefreshTokensForUser(int userId);
 }
 
 public sealed class InMemorySalesRepository : ISalesRepository
@@ -44,6 +52,8 @@ public sealed class InMemorySalesRepository : ISalesRepository
     private int _nextNoteId = 1;
     private int _nextHappyVisitGroupId = 1;
     private int _nextDashboardPostId = 1;
+    private int _nextRefreshTokenId = 1;
+    private readonly List<RefreshToken> _refreshTokens = [];
 
     public InMemorySalesRepository(IPasswordHasher passwordHasher)
     {
@@ -73,6 +83,56 @@ public sealed class InMemorySalesRepository : ISalesRepository
         lock (_sync)
         {
             return _users.ToList();
+        }
+    }
+
+    public UserAccount AddUser(UserAccount user)
+    {
+        lock (_sync)
+        {
+            user.Id = _users.Count == 0 ? 1 : _users.Max(item => item.Id) + 1;
+            user.CreatedAt = DateTimeOffset.UtcNow;
+            _users.Add(user);
+            return user;
+        }
+    }
+
+    public UserAccount? UpdateUser(int id, UserAccount user, string? passwordHash, string? salt)
+    {
+        lock (_sync)
+        {
+            var existing = _users.FirstOrDefault(item => item.Id == id);
+            if (existing is null)
+            {
+                return null;
+            }
+
+            existing.Email = user.Email;
+            existing.FullName = user.FullName;
+            existing.Role = user.Role;
+            existing.IsActive = user.IsActive;
+            if (!string.IsNullOrWhiteSpace(passwordHash) && !string.IsNullOrWhiteSpace(salt))
+            {
+                existing.PasswordHash = passwordHash;
+                existing.Salt = salt;
+            }
+
+            return existing;
+        }
+    }
+
+    public bool DeactivateUser(int id)
+    {
+        lock (_sync)
+        {
+            var existing = _users.FirstOrDefault(item => item.Id == id);
+            if (existing is null)
+            {
+                return false;
+            }
+
+            existing.IsActive = false;
+            return true;
         }
     }
 
@@ -200,6 +260,22 @@ public sealed class InMemorySalesRepository : ISalesRepository
             }
 
             return removableIds.Count;
+        }
+    }
+
+    public CustomerXmlImportResponse ReplaceCustomers(ClaimsPrincipal principal, IReadOnlyList<Customer> customers)
+    {
+        lock (_sync)
+        {
+            var deleted = ClearCustomers(principal);
+            var results = new List<CustomerXmlImportRowResult>();
+            for (var index = 0; index < customers.Count; index += 1)
+            {
+                var customer = AddCustomer(customers[index]);
+                results.Add(new CustomerXmlImportRowResult(index + 2, true, customer.Id, customer.CompanyName, null));
+            }
+
+            return new CustomerXmlImportResponse(customers.Count, deleted, results.Count, true, results);
         }
     }
 
@@ -418,6 +494,49 @@ public sealed class InMemorySalesRepository : ISalesRepository
         {
             var existing = _dashboardPosts.FirstOrDefault(post => post.Id == id);
             return existing is not null && _dashboardPosts.Remove(existing);
+        }
+    }
+
+    public void StoreRefreshToken(RefreshToken token)
+    {
+        lock (_sync)
+        {
+            token.Id = _nextRefreshTokenId++;
+            token.CreatedAt = DateTimeOffset.UtcNow;
+            _refreshTokens.Add(token);
+        }
+    }
+
+    public RefreshToken? FindActiveRefreshToken(string tokenHash)
+    {
+        lock (_sync)
+        {
+            return _refreshTokens.FirstOrDefault(token =>
+                token.TokenHash == tokenHash &&
+                token.RevokedAt is null &&
+                token.ExpiresAt > DateTimeOffset.UtcNow);
+        }
+    }
+
+    public void RevokeRefreshToken(string tokenHash)
+    {
+        lock (_sync)
+        {
+            foreach (var token in _refreshTokens.Where(token => token.TokenHash == tokenHash && token.RevokedAt is null))
+            {
+                token.RevokedAt = DateTimeOffset.UtcNow;
+            }
+        }
+    }
+
+    public void RevokeRefreshTokensForUser(int userId)
+    {
+        lock (_sync)
+        {
+            foreach (var token in _refreshTokens.Where(token => token.UserId == userId && token.RevokedAt is null))
+            {
+                token.RevokedAt = DateTimeOffset.UtcNow;
+            }
         }
     }
 

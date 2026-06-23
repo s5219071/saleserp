@@ -10,9 +10,36 @@ public sealed record LoginResponse(
     string FullName,
     string Role,
     string Token,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    string CsrfToken);
 
 public sealed record UserProfileResponse(int Id, string Email, string FullName, string Role);
+
+public sealed record UserAccountDto(
+    int Id,
+    string Email,
+    string FullName,
+    string Role,
+    bool IsActive,
+    DateTimeOffset CreatedAt)
+{
+    public static UserAccountDto From(UserAccount user) =>
+        new(user.Id, user.Email, user.FullName, user.Role.ToString(), user.IsActive, user.CreatedAt);
+}
+
+public sealed record CreateUserRequest(
+    string Email,
+    string Password,
+    string FullName,
+    string Role,
+    bool IsActive = true);
+
+public sealed record UpdateUserRequest(
+    string? Email,
+    string? Password,
+    string? FullName,
+    string? Role,
+    bool? IsActive);
 
 public sealed record GroupDto(int Id, string GroupName, string HexColor, string? Description)
 {
@@ -168,6 +195,22 @@ public sealed record BulkImportResponse(
     int Updated,
     int Skipped,
     IReadOnlyList<BulkImportError> Errors);
+
+public sealed record CustomerXmlImportRequest(IReadOnlyList<CreateCustomerRequest> Customers);
+
+public sealed record CustomerXmlImportRowResult(
+    int RowNumber,
+    bool Success,
+    int? CustomerId,
+    string CompanyName,
+    string? Error);
+
+public sealed record CustomerXmlImportResponse(
+    int TotalRows,
+    int Deleted,
+    int Inserted,
+    bool Committed,
+    IReadOnlyList<CustomerXmlImportRowResult> Rows);
 
 public sealed class CustomerImportRow
 {

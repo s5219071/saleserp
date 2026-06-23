@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ECNESOFT Field Sales</title>
-  <link rel="stylesheet" href="/app.css?v=20260623-manual-coordinate-map">
+  <link rel="stylesheet" href="/app.css?v=20260623-sqlite-security-users">
 </head>
 <body>
   <div id="loginView" class="login-shell">
@@ -43,6 +43,7 @@
         <button class="nav-button" data-view="happyVisitView">Happy Visit</button>
         <button class="nav-button" data-view="dashboardView">Dashboard</button>
         <button class="nav-button" data-view="customerView">Customer</button>
+        <button id="usersNavButton" class="nav-button" data-view="usersView" hidden>Users</button>
       </nav>
       <button id="logoutButton" class="secondary-button">Logout</button>
     </aside>
@@ -205,7 +206,16 @@
           <h3>Filter</h3>
           <div id="customerTypeFilters" class="check-grid"></div>
         </section>
+        <div id="customerImportSummary" class="import-summary" hidden></div>
         <div id="customerTable" class="customer-table"></div>
+      </section>
+
+      <section id="usersView" class="view">
+        <div class="section-head">
+          <h2>Users</h2>
+          <button id="addUserButton" type="button">Add User</button>
+        </div>
+        <div id="usersTable" class="customer-table"></div>
       </section>
     </main>
   </div>
@@ -258,6 +268,35 @@
     </section>
   </div>
 
-  <script src="/app.js?v=20260623-manual-coordinate-map"></script>
+  <div id="userModal" class="modal-backdrop" hidden>
+    <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="userModalTitle">
+      <div class="modal-head">
+        <h2 id="userModalTitle">Add User</h2>
+        <button id="closeUserModalButton" type="button" class="icon-button" aria-label="Close">x</button>
+      </div>
+      <form id="userForm" class="create-form">
+        <label>Username<input name="email" autocomplete="username" required></label>
+        <label>Full Name<input name="fullName" required></label>
+        <label>Password
+          <input name="password" type="password" autocomplete="new-password" minlength="8">
+          <small id="userPasswordHelp">Minimum 8 characters.</small>
+        </label>
+        <label>Role
+          <select name="role" required>
+            <option value="SALES">SALES</option>
+            <option value="ADMIN">ADMIN</option>
+          </select>
+        </label>
+        <label class="check-row wide"><input name="isActive" type="checkbox" checked> Active</label>
+        <div id="userStatus" class="geocode-status wide" aria-live="polite"></div>
+        <div class="modal-actions wide">
+          <button id="cancelUserButton" type="button" class="light-button">Cancel</button>
+          <button id="userSubmitButton" type="submit">Add User</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <script src="/app.js?v=20260623-sqlite-security-users"></script>
 </body>
 </html>
