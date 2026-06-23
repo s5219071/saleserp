@@ -8,5 +8,9 @@ obj/
 *.tmp
 *.log
 wwwroot/uploads/
+App_Data/
+*.db
+*.db-shm
+*.db-wal
 appsettings.Local.json
 appsettings.*.local.json
