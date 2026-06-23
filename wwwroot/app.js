@@ -21,9 +21,6 @@ const state = {
     map: null,
     infoWindow: null,
     AdvancedMarkerElement: null,
-    Autocomplete: null,
-    geocoder: null,
-    addressAutocomplete: null,
     previewMarker: null,
     markers: new globalThis.Map()
   },
@@ -116,70 +113,6 @@ const customerImportAliases = new Map(customerXmlTemplateFields.flatMap((field) 
   ["lat", "latitude"]
 ]));
 
-const postcodeFallbacks = {
-  "2000": { latitude: -33.8688, longitude: 151.2093, label: "Sydney 2000" },
-  "2067": { latitude: -33.7969, longitude: 151.1840, label: "Chatswood 2067" },
-  "2122": { latitude: -33.7910, longitude: 151.0807, label: "Eastwood 2122" },
-  "2134": { latitude: -33.8775, longitude: 151.1037, label: "Burwood 2134" },
-  "2135": { latitude: -33.8736, longitude: 151.0938, label: "Strathfield 2135" },
-  "2141": { latitude: -33.8643, longitude: 151.0458, label: "Lidcombe 2141" },
-  "2128": { latitude: -33.8353852, longitude: 151.0398518, label: "Silverwater 2128" },
-  "2150": { latitude: -33.8150, longitude: 151.0011, label: "Parramatta 2150" },
-  "3000": { latitude: -37.8136, longitude: 144.9631, label: "Melbourne 3000" },
-  "4000": { latitude: -27.4698, longitude: 153.0251, label: "Brisbane 4000" },
-  "5000": { latitude: -34.9285, longitude: 138.6007, label: "Adelaide 5000" },
-  "6000": { latitude: -31.9523, longitude: 115.8613, label: "Perth 6000" }
-};
-
-const exactAddressFallbacks = [
-  {
-    keys: [
-      "14/20-30 stubbs st silverwater nsw 2128",
-      "14/20 -30 stubbs st silverwater nsw 2128",
-      "14 20 30 stubbs st silverwater nsw 2128",
-      "20-30 stubbs st silverwater nsw 2128",
-      "20 30 stubbs st silverwater nsw 2128",
-      "20-30 stubbs street silverwater nsw 2128"
-    ],
-    latitude: -33.8353852,
-    longitude: 151.0398518,
-    label: "20-30 Stubbs St, Silverwater 2128"
-  },
-  {
-    keys: [
-      "23 east st lidcombe 2141",
-      "23 east street lidcombe 2141",
-      "23 east st lidcombe nsw 2141",
-      "23 east street lidcombe nsw 2141"
-    ],
-    latitude: -33.8665647,
-    longitude: 151.047476,
-    label: "23 East St, Lidcombe 2141"
-  },
-  {
-    keys: [
-      "shop 1 29-31 joseph st lidcombe 2141",
-      "shop 1 29-31 joseph street lidcombe 2141",
-      "29-31 joseph st lidcombe 2141",
-      "29-31 joseph street lidcombe 2141"
-    ],
-    latitude: -33.8643,
-    longitude: 151.0458,
-    label: "Lidcombe 2141"
-  }
-];
-
-const stateFallbacks = {
-  NSW: postcodeFallbacks["2000"],
-  VIC: postcodeFallbacks["3000"],
-  QLD: postcodeFallbacks["4000"],
-  SA: postcodeFallbacks["5000"],
-  WA: postcodeFallbacks["6000"],
-  ACT: { latitude: -35.2809, longitude: 149.1300, label: "Canberra ACT" },
-  TAS: { latitude: -42.8821, longitude: 147.3272, label: "Hobart TAS" },
-  NT: { latitude: -12.4634, longitude: 130.8456, label: "Darwin NT" }
-};
-
 const $ = (selector) => document.querySelector(selector);
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -194,7 +127,6 @@ function bindEvents() {
   $("#openNewButton").addEventListener("click", openNewCustomerModal);
   $("#newCustomerForm").addEventListener("submit", createCustomer);
   $("#newCustomerType").addEventListener("change", toggleTerminationFields);
-  $("#googleAddressLookupButton").addEventListener("click", lookupAddressWithGoogle);
   ["address", "city", "state", "postcode"].forEach((name) => {
     $("#newCustomerForm").elements[name].addEventListener("blur", syncAddressFieldsFromCurrentForm);
   });
@@ -455,15 +387,13 @@ async function initializeMapProvider() {
     }
 
     await loadGoogleMapsScript(config);
-    const [{ Map: GoogleMap, InfoWindow }, { AdvancedMarkerElement }, { Geocoder }] = await Promise.all([
+    const [{ Map: GoogleMap, InfoWindow }, { AdvancedMarkerElement }] = await Promise.all([
       google.maps.importLibrary("maps"),
-      google.maps.importLibrary("marker"),
-      google.maps.importLibrary("geocoding")
+      google.maps.importLibrary("marker")
     ]);
 
     state.google.enabled = true;
     state.google.AdvancedMarkerElement = AdvancedMarkerElement;
-    state.google.geocoder = new Geocoder();
     state.google.infoWindow = new InfoWindow();
     state.google.map = new GoogleMap($("#googleMapCanvas"), {
       center: defaultGoogleView.center,
@@ -489,35 +419,9 @@ async function initializeMapProvider() {
     $("#mapCanvas").hidden = true;
     $("#mapProviderStatus").textContent = "Google Maps";
     updateGoogleZoomLabel();
-    await initializeGoogleAddressEngine();
   } catch (error) {
     console.warn("Google Maps could not be loaded.", error);
     useInternalMap("Internal map - Google Maps failed to load");
-  }
-}
-
-async function initializeGoogleAddressEngine() {
-  if (!state.google.enabled || state.google.addressAutocomplete) {
-    return;
-  }
-
-  try {
-    const { Autocomplete } = await google.maps.importLibrary("places");
-    state.google.Autocomplete = Autocomplete;
-    const addressInput = $("#newCustomerForm").elements.address;
-    addressInput.setAttribute("autocomplete", "off");
-    state.google.addressAutocomplete = new Autocomplete(addressInput, {
-      componentRestrictions: { country: "au" },
-      fields: ["address_components", "formatted_address", "geometry", "name"],
-      types: ["address"]
-    });
-    state.google.addressAutocomplete.addListener("place_changed", () => {
-      const place = state.google.addressAutocomplete.getPlace();
-      applyGoogleAddressResult(place, "Google address selected.");
-    });
-  } catch (error) {
-    console.warn("Google Places address engine could not be loaded.", error);
-    $("#geocodeStatus").textContent = "Google address engine is unavailable. Enter Latitude and Longitude manually.";
   }
 }
 
@@ -561,9 +465,6 @@ function loadGoogleMapsScript(config) {
 function useInternalMap(message) {
   state.google.enabled = false;
   state.google.map = null;
-  state.google.geocoder = null;
-  state.google.Autocomplete = null;
-  state.google.addressAutocomplete = null;
   state.google.markers.clear();
   $("#googleMapCanvas").hidden = true;
   $("#mapCanvas").hidden = false;
@@ -729,6 +630,16 @@ function filteredCustomersForMap() {
   return rows;
 }
 
+function customersForMapMarkers() {
+  const rows = filteredCustomersForMap();
+  if (!state.selectedCustomerId || rows.some((customer) => customer.id === state.selectedCustomerId)) {
+    return rows;
+  }
+
+  const selectedCustomer = state.customers.find((customer) => customer.id === state.selectedCustomerId);
+  return selectedCustomer ? [...rows, selectedCustomer] : rows;
+}
+
 function selectedHappyGroupIds() {
   const groupId = Number(state.filters.happyGroupId);
   const group = state.happyGroups.find((item) => item.id === groupId);
@@ -759,7 +670,7 @@ function renderPins(fit = false) {
 function renderInternalPins() {
   const layer = $("#pinLayer");
   layer.replaceChildren();
-  filteredCustomersForMap().forEach((customer) => {
+  customersForMapMarkers().forEach((customer) => {
     const style = markerStyleFor(customer);
     const point = coordsToPoint(customer.latitude, customer.longitude);
     const pin = document.createElement("button");
@@ -789,7 +700,7 @@ function renderGoogleMarkers(fit) {
   });
   state.google.markers.clear();
 
-  const customers = filteredCustomersForMap();
+  const customers = customersForMapMarkers();
   const googleBounds = new google.maps.LatLngBounds();
   customers.forEach((customer) => {
     const position = { lat: customer.latitude, lng: customer.longitude };
@@ -1100,102 +1011,6 @@ function readManualCoordinates(data, options = {}) {
   return { valid: true, latitude, longitude };
 }
 
-async function lookupAddressWithGoogle() {
-  const form = $("#newCustomerForm");
-  const status = $("#geocodeStatus");
-
-  if (!state.google.enabled || !state.google.geocoder) {
-    status.textContent = "Google address lookup is unavailable. Enter Latitude and Longitude manually.";
-    return;
-  }
-
-  syncParsedAddressToForm(parseAddressInput(new FormData(form)));
-  const parsed = parseAddressInput(new FormData(form));
-  const variants = addressVariants(parsed);
-  if (variants.length === 0) {
-    status.textContent = "Enter an address before using Google Address.";
-    return;
-  }
-
-  status.textContent = "Finding address with Google...";
-  let lastStatus = "";
-  for (const address of variants) {
-    try {
-      const results = await geocodeWithStatus({
-        address,
-        componentRestrictions: { country: "AU" },
-        region: "AU"
-      });
-      applyGoogleAddressResult(results[0], "Google address matched.");
-      return;
-    } catch (error) {
-      lastStatus = error.message || "Google address lookup failed.";
-    }
-  }
-
-  status.textContent = `Google address lookup failed (${lastStatus}). Enter Latitude and Longitude manually.`;
-}
-
-function applyGoogleAddressResult(result, message) {
-  const location = result?.geometry?.location;
-  if (!location) {
-    $("#geocodeStatus").textContent = "Google address did not include coordinates.";
-    return false;
-  }
-
-  const form = $("#newCustomerForm");
-  const components = result.address_components || [];
-  const street = buildStreetAddress(components, result.name || "");
-  const suburb = addressComponent(components, ["locality", "postal_town", "sublocality_level_1", "administrative_area_level_2"]);
-  const stateName = addressComponent(components, ["administrative_area_level_1"], "short_name");
-  const postcode = addressComponent(components, ["postal_code"]);
-  const geocode = {
-    latitude: Number(location.lat().toFixed(7)),
-    longitude: Number(location.lng().toFixed(7)),
-    message
-  };
-
-  if (street) {
-    setFormValue(form, "address", street);
-  }
-  if (suburb) {
-    setFormValue(form, "city", suburb);
-  }
-  if (stateName) {
-    setFormValue(form, "state", stateName.toUpperCase());
-  }
-  if (postcode) {
-    setFormValue(form, "postcode", postcode);
-  }
-
-  updateCalculatedCoordinateFields(geocode);
-  showAddressPreviewOnMap(geocode);
-  $("#geocodeStatus").textContent = `${message} Latitude ${formatCoordinate(geocode.latitude)}, Longitude ${formatCoordinate(geocode.longitude)}.`;
-  return true;
-}
-
-function buildStreetAddress(components, fallbackName) {
-  const subpremise = addressComponent(components, ["subpremise"], "short_name");
-  const streetNumber = addressComponent(components, ["street_number"], "short_name");
-  const route = addressComponent(components, ["route"], "short_name");
-  const street = [streetNumber, route].filter(Boolean).join(" ").trim();
-
-  if (subpremise && street) {
-    return `${subpremise}/${street}`;
-  }
-  if (street) {
-    return street;
-  }
-  return fallbackName || "";
-}
-
-function addressComponent(components, types, name = "long_name") {
-  const typeList = Array.isArray(types) ? types : [types];
-  const match = components.find((component) =>
-    typeList.some((type) => component.types?.includes(type)));
-  return match?.[name] || "";
-}
-
 function syncParsedAddressToForm(parsed) {
   const form = $("#newCustomerForm");
   if (parsed.address && normalizeAddressKey(parsed.address) !== normalizeAddressKey(parsed.rawAddress)) {
@@ -1268,72 +1083,6 @@ async function saveInitialPhotos(customerId, files, data, isEditing = false) {
   }
 }
 
-async function resolveCustomerCoordinates(data) {
-  const parsed = parseAddressInput(data);
-  const exactFallback = exactCoordinates(parsed);
-  if (exactFallback) {
-    return { ...exactFallback, message: `${exactFallback.label} matched locally.` };
-  }
-
-  const fallback = fallbackCoordinates(parsed);
-  if (!state.google.enabled || !state.google.geocoder) {
-    return { ...fallback, message: `Saved with ${fallback.label} fallback coordinates.` };
-  }
-
-  const variants = addressVariants(parsed);
-  let lastStatus = "";
-  for (const address of variants) {
-    try {
-      const results = await geocodeWithStatus({
-        address,
-        componentRestrictions: { country: "AU" },
-        region: "AU"
-      });
-      const location = results[0].geometry.location;
-      return {
-        latitude: Number(location.lat().toFixed(6)),
-        longitude: Number(location.lng().toFixed(6)),
-        message: `Google Maps matched ${results[0].formatted_address || address}.`
-      };
-    } catch (error) {
-      lastStatus = error.message || "Google geocoding failed.";
-      if (lastStatus.includes("REQUEST_DENIED")) {
-        break;
-      }
-    }
-  }
-
-  return {
-    ...fallback,
-    message: `Google geocoding unavailable (${lastStatus}). Saved with ${fallback.label} fallback coordinates; drag the marker to fine-tune.`
-  };
-}
-
-function addressVariants(data) {
-  const street = String(data.address || "").trim();
-  const suburb = String(data.city || "").trim();
-  const stateName = String(data.state || "").trim().toUpperCase();
-  const postcode = String(data.postcode || "").trim();
-  const normalizedStreet = street
-    .replace(/\bst\b/ig, "Street")
-    .replace(/\brd\b/ig, "Road")
-    .replace(/\bave\b/ig, "Avenue");
-  const withoutShop = normalizedStreet.replace(/^(shop|unit|suite)\s*\w+\s*/i, "").trim();
-  const locality = `${suburb} ${stateName} ${postcode}, Australia`;
-  return [...new Set([
-    `${normalizedStreet}, ${locality}`,
-    `${withoutShop}, ${locality}`,
-    `${street}, ${locality}`,
-    `${suburb} ${postcode}, Australia`
-  ].filter((value) => value.trim().length > 12))];
-}
-
-function fallbackCoordinates(data) {
-  const postcode = String(data.postcode || "").trim();
-  const stateName = String(data.state || "NSW").trim().toUpperCase();
-  return postcodeFallbacks[postcode] || stateFallbacks[stateName] || postcodeFallbacks["2000"];
-}
-
 function parseAddressInput(data) {
   const rawAddress = String(data.get ? data.get("address") : data.address || "").trim();
   let city = String(data.get ? data.get("city") : data.city || "").trim();
@@ -1386,12 +1135,6 @@ function splitStreetAndSuburb(value) {
   return address && city ? { address, city } : null;
 }
 
-function exactCoordinates(data) {
-  const key = normalizeAddressKey(`${data.rawAddress || data.address} ${data.city} ${data.state} ${data.postcode}`);
-  return exactAddressFallbacks.find((item) =>
-    item.keys.some((candidate) => key.includes(normalizeAddressKey(candidate))));
-}
-
 function normalizeAddressKey(value) {
   return String(value || "")
     .toLowerCase()
@@ -1400,18 +1143,6 @@ function normalizeAddressKey(value) {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function geocodeWithStatus(request) {
-  return new Promise((resolve, reject) => {
-    state.google.geocoder.geocode(request, (results, status) => {
-      if (status === "OK" && results?.length) {
-        resolve(results);
-        return;
-      }
-      reject(new Error(`Google status: ${status || "UNKNOWN_ERROR"}`));
-    });
-  });
 }
 
 function clearMapFilters() {

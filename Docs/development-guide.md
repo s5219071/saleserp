@@ -15,7 +15,6 @@
 - 고객 Type 필터링: `ACTIVE`, `TERMINATION`, `CLOSED`, `PROSPECT`, `OWNERSHIP`
 - 고객 직접 등록 및 수정
 - Latitude, Longitude 직접 입력 기반 Google Map 매핑
-- Google Places/Geocoder 기반 주소 검색 및 좌표 자동 입력
 - 고객 Note 표시
 - Happy Visit 고객 그룹 관리
 - Dashboard 게시판 작성, 조회, 수정, 삭제
@@ -348,8 +347,8 @@ ETC: lime, E
 고객 등록:
 
 - Latitude, Longitude는 사용자가 직접 입력합니다.
-- Address 입력은 Google Places address autocomplete와 연결됩니다.
-- `Google Address` 버튼은 현재 주소 필드를 Google Geocoder로 조회해 Suburb, State, Postcode, Latitude, Longitude를 채웁니다.
+- Address, Suburb, State, Postcode는 고객 정보로 저장합니다.
+- Latitude, Longitude에 사용자가 입력한 값이 Google Map marker 위치로 저장됩니다.
 - 입력된 좌표로 Google Map preview marker가 이동합니다.
 - 저장 시 입력 좌표가 고객 좌표로 저장됩니다.
 
