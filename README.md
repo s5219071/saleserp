@@ -27,6 +27,7 @@ Included:
 - Haversine-radius prospect recommendation endpoint
 - Admin postcode/suburb penetration dashboard API
 - SQLite schema and frontend Google Maps integration guide under `Docs`
+- Full developer documentation: `Docs/development-guide.md`
 
 Important production changes:
 
