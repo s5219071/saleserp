@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ECNESOFT Field Sales</title>
+  <link rel="stylesheet" href="/app.css?v=20260623-customer-xml-grid">
+</head>
+<body>
+  <div id="loginView" class="login-shell">
+    <main class="login-panel" aria-labelledby="loginTitle">
+      <img class="brand-logo" src="/assets/ecnesoft-logo.png" alt="ECNESOFT">
+      <h1 id="loginTitle">Field Sales</h1>
+      <form id="loginForm" class="login-form">
+        <label>ID<input id="loginEmail" autocomplete="username" value="Ecnesoft" required></label>
+        <label>Password<input id="loginPassword" type="password" autocomplete="current-password" value="Ecnesoft" required></label>
+        <button type="submit">Login</button>
+        <p id="loginError" class="form-error" role="alert"></p>
+      </form>
+    </main>
+    <aside class="login-map" aria-label="Sales coverage preview">
+      <div class="preview-map">
+        <span class="preview-pin status-active" style="left:61%;top:49%"></span>
+        <span class="preview-pin status-prospect" style="left:36%;top:47%"></span>
+        <span class="preview-pin status-termination" style="left:58%;top:28%"></span>
+        <span class="preview-pin status-closed" style="left:32%;top:29%"></span>
+      </div>
+    </aside>
+  </div>
+
+  <div id="appView" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <img src="/assets/ecnesoft-logo.png" alt="ECNESOFT">
+        <span>Field Sales</span>
+      </div>
+      <div class="user-chip">
+        <strong id="userName">-</strong>
+        <span id="userRole">-</span>
+      </div>
+      <nav class="nav-stack" aria-label="Application views">
+        <button class="nav-button active" data-view="mapView">Map</button>
+        <button class="nav-button" data-view="happyVisitView">Happy Visit</button>
+        <button class="nav-button" data-view="dashboardView">Dashboard</button>
+        <button class="nav-button" data-view="customerView">Customer</button>
+      </nav>
+      <button id="logoutButton" class="secondary-button">Logout</button>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <button id="openNewButton" class="new-button">New</button>
+        <div id="statusMessage" class="status-message"></div>
+      </header>
+
+      <section id="mapView" class="view active">
+        <div class="summary-strip">
+          <div><span id="metricActive">0</span><small>Active <b id="metricActiveDelta">+0</b></small></div>
+          <div><span id="metricTermination">0</span><small>Termination <b id="metricTerminationDelta">+0</b></small></div>
+          <div><span id="metricClosed">0</span><small>Closed <b id="metricClosedDelta">+0</b></small></div>
+          <div><span id="metricProspect">0</span><small>Prospect <b id="metricProspectDelta">+0</b></small></div>
+        </div>
+
+        <div class="map-layout">
+          <section class="map-surface" aria-label="Customer map">
+            <div class="map-toolbar">
+              <div class="map-title">
+                <strong>Australia Map</strong>
+                <span id="mapProviderStatus">Internal map</span>
+              </div>
+              <div class="zoom-controls">
+                <button id="zoomOutButton" type="button" class="icon-button" title="Zoom out" aria-label="Zoom out">-</button>
+                <span id="zoomLevel">100%</span>
+                <button id="zoomInButton" type="button" class="icon-button" title="Zoom in" aria-label="Zoom in">+</button>
+                <button id="resetMapButton" type="button">Reset</button>
+              </div>
+            </div>
+
+            <div id="googleMapCanvas" class="google-map-canvas" hidden></div>
+            <div id="mapCanvas" class="map-canvas">
+              <div id="mapWorld" class="map-world">
+                <svg class="australia-svg" viewBox="0 0 1000 820" role="img" aria-label="Australia base map">
+                  <path class="land" d="M183 362 L217 291 L282 235 L363 205 L450 186 L548 202 L632 236 L704 294 L770 360 L824 441 L824 517 L775 593 L694 642 L607 659 L514 634 L431 662 L340 643 L257 585 L197 506 Z"></path>
+                  <path class="land tas" d="M633 721 L688 708 L730 737 L707 778 L653 780 L620 751 Z"></path>
+                  <path class="coast" d="M213 478 L284 448 L363 452 L438 497 L500 538 L579 548 L655 520 L742 478"></path>
+                  <path class="state-line" d="M392 229 L399 643"></path>
+                  <path class="state-line" d="M547 203 L548 633"></path>
+                  <path class="state-line" d="M548 449 L817 449"></path>
+                  <path class="state-line" d="M548 559 L716 559"></path>
+                </svg>
+                <div class="map-label" data-lat="-26.5" data-lng="122.2">WA</div>
+                <div class="map-label" data-lat="-20.2" data-lng="133.6">NT</div>
+                <div class="map-label" data-lat="-30.5" data-lng="135.0">SA</div>
+                <div class="map-label" data-lat="-22.5" data-lng="145.5">QLD</div>
+                <div class="map-label" data-lat="-32.7" data-lng="147.4">NSW</div>
+                <div class="map-label" data-lat="-37.1" data-lng="144.3">VIC</div>
+                <div class="map-label" data-lat="-42.0" data-lng="147.0">TAS</div>
+                <div id="pinLayer"></div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="right-panel filter-panel">
+            <h2>Filter</h2>
+            <section>
+              <h3>Type</h3>
+              <div id="mapTypeFilters" class="check-grid"></div>
+            </section>
+            <section>
+              <h3>Data Option</h3>
+              <div id="dateFilters" class="check-grid"></div>
+            </section>
+            <section>
+              <h3>Competitor Option</h3>
+              <div id="competitorFilters" class="check-grid"></div>
+            </section>
+            <section>
+              <h3>Happy Visit option</h3>
+              <select id="happyVisitFilter">
+                <option value="">Select group</option>
+              </select>
+            </section>
+            <button id="clearMapFiltersButton" type="button" class="light-button">Clear Filter</button>
+            <div id="filterCustomerList" class="customer-list compact-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="happyVisitView" class="view">
+        <div class="section-head">
+          <h2>Group List</h2>
+          <span id="happyVisitStatus"></span>
+        </div>
+        <div class="happy-grid">
+          <section class="panel">
+            <label>Group Name<input id="happyGroupName" maxlength="80" placeholder="Required"></label>
+            <label>Type
+              <select id="happyTypeSelect" required>
+                <option value="">Select type</option>
+                <option value="ACTIVE">Active</option>
+                <option value="TERMINATION">Termination</option>
+                <option value="CLOSED">Closed</option>
+                <option value="PROSPECT">Prospect</option>
+                <option value="OWNERSHIP">Ownership</option>
+              </select>
+            </label>
+            <div class="section-head slim">
+              <h3>Customer List</h3>
+              <span id="happyPageLabel">0 / 0</span>
+            </div>
+            <div id="happyCustomerList" class="select-list"></div>
+            <div class="pager">
+              <button id="happyPrevButton" type="button" class="light-button">Previous</button>
+              <button id="happyAddSelectedButton" type="button">Add Selected</button>
+              <button id="happyNextButton" type="button" class="light-button">Next</button>
+            </div>
+          </section>
+          <section class="panel">
+            <h3>Group List</h3>
+            <div id="happySelectedList" class="select-list"></div>
+            <div class="modal-actions">
+              <button id="happyCancelButton" type="button" class="light-button">Cancel</button>
+              <button id="happySaveButton" type="button">Save</button>
+            </div>
+            <h3>Saved Groups</h3>
+            <div id="happyGroupList" class="select-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="dashboardView" class="view">
+        <div id="postBoard">
+          <div class="section-head">
+            <h2>Dashboard Board</h2>
+            <button id="addPostButton" type="button">Add Post</button>
+          </div>
+          <div id="postList" class="post-list"></div>
+        </div>
+        <form id="postForm" class="post-form panel" hidden>
+          <div class="section-head">
+            <h2 id="postFormTitle">Post</h2>
+            <button id="backPostButton" type="button" class="light-button">Back</button>
+          </div>
+          <label>Post Name<input name="postName" maxlength="100" required></label>
+          <label>Editor<input name="editor" maxlength="80" required></label>
+          <label>Description<textarea name="description" rows="5" required></textarea></label>
+          <label>Upload<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+          <button id="postSubmitButton" type="submit">Post</button>
+        </form>
+        <section id="postDetail" class="panel post-detail" hidden></section>
+      </section>
+
+      <section id="customerView" class="view">
+        <div class="section-head">
+          <h2>Customer List</h2>
+          <div class="customer-import-actions">
+            <button id="exportCustomerTemplateButton" type="button" class="light-button">Export Template</button>
+            <label class="import-file-button">
+              Import XML
+              <input id="importCustomerXmlInput" type="file" accept=".xml,text/xml,application/xml" hidden>
+            </label>
+          </div>
+        </div>
+        <section class="panel">
+          <h3>Filter</h3>
+          <div id="customerTypeFilters" class="check-grid"></div>
+        </section>
+        <div id="customerTable" class="customer-table"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="newCustomerModal" class="modal-backdrop" hidden>
+    <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="newCustomerTitle">
+      <div class="modal-head">
+        <h2 id="newCustomerTitle">New</h2>
+        <button id="closeNewCustomerButton" type="button" class="icon-button" aria-label="Close">x</button>
+      </div>
+      <form id="newCustomerForm" class="create-form">
+        <label>Company<input name="companyName" placeholder="Company name" required></label>
+        <label>Type
+          <select name="type" id="newCustomerType" required>
+            <option value="">Select type</option>
+            <option value="ACTIVE">Active</option>
+            <option value="TERMINATION">Termination</option>
+            <option value="CLOSED">Closed</option>
+            <option value="PROSPECT">Prospect</option>
+            <option value="OWNERSHIP">Ownership</option>
+          </select>
+        </label>
+        <label class="termination-field" hidden>Termination Date<input name="terminationDate" type="date"></label>
+        <label class="termination-field wide" hidden>Termination Reason<textarea name="terminationReason" maxlength="100" rows="3" placeholder="Required for Termination"></textarea></label>
+        <label>Competitor
+          <select name="competitor">
+            <option value="">Select competitor</option>
+            <option value="KPOS">Kpos</option>
+            <option value="ORDERNOW">OrderNow</option>
+            <option value="QONUS">Qonus</option>
+            <option value="SQUARE">Square</option>
+            <option value="ETC">ETC</option>
+          </select>
+        </label>
+        <label>ABN<input name="abn" placeholder="ABN"></label>
+        <label>Address<input name="address" placeholder="Shop 1 29-31 Joseph st" required></label>
+        <label>Suburb<input name="city" placeholder="Suburb" value="Lidcombe" required></label>
+        <label>State<input name="state" placeholder="State" value="NSW" required></label>
+        <label>Postcode<input name="postcode" placeholder="Postcode" value="2141" required></label>
+        <label>Latitude<input name="calculatedLatitude" type="number" inputmode="decimal" step="any" min="-90" max="90" placeholder="-33.8353852" required></label>
+        <label>Longitude<input name="calculatedLongitude" type="number" inputmode="decimal" step="any" min="-180" max="180" placeholder="151.0398518" required></label>
+        <label class="wide">Note<textarea name="generalNote" maxlength="200" rows="3" placeholder="Customer memo, up to 200 characters"></textarea></label>
+        <label class="wide">Choose File<input name="photos" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+        <div id="geocodeStatus" class="geocode-status" aria-live="polite"></div>
+        <div class="modal-actions">
+          <button id="cancelNewCustomerButton" type="button" class="light-button">Cancel</button>
+          <button type="submit">Add Customer</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <script src="/app.js?v=20260623-customer-xml-grid"></script>
+</body>
+</html>
