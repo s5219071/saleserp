@@ -12,7 +12,10 @@
 - Auth: 로그인 시 30분 access token과 7일 refresh token을 발급합니다.
 - Refresh token: HTTP-only cookie `EcnesoftSales.Refresh`로 저장하고, DB에는 SHA-256 hash만 저장합니다.
 - CSRF: cookie 기반 POST/PUT/PATCH/DELETE 요청은 `X-CSRF-TOKEN` header를 검증합니다. Bearer JWT API client는 기존 방식 그대로 사용할 수 있습니다.
+- Rate limiting: login 10/min/IP, refresh 20/min/IP, authenticated `/api` 200/min/user 제한을 적용합니다.
+- Health check: public `GET /health`가 SQLite 연결과 `wwwroot/uploads` 쓰기 가능 여부를 점검합니다.
 - User Management: ADMIN 전용 `Users` 화면과 `/api/users` CRUD endpoint가 있습니다.
+- ABR Lookup: 기본 DI는 `MockAbrLookupClient`를 유지하고, 운영 전환용 `RealAbrLookupClient`가 준비되어 있습니다.
 - XML Import: `/api/customers/import`가 모든 row를 검증한 뒤 하나의 DB transaction으로 기존 customer를 교체합니다. 실패 시 기존 customer 데이터는 유지됩니다.
 - Schema reference: `Docs/schema.sql`은 현재 EF Core SQLite 모델 기준으로 갱신되어 있습니다.
 
@@ -64,13 +67,18 @@ EcnesoftFieldSales/
     Dtos.cs
     Entities.cs
   Infrastructure/
+    FieldSalesHealthChecks.cs
     InMemorySalesRepository.cs
+    SalesDbContext.cs
+    SalesDbInitializer.cs
+    SqliteSalesRepository.cs
   Services/
     AbnServices.cs
     FileStorageService.cs
     ImportParser.cs
     JwtTokenService.cs
     PasswordHasher.cs
+    RealAbrLookupClient.cs
   wwwroot/
     index.html
     app.js
@@ -88,7 +96,12 @@ EcnesoftFieldSales/
 - `Program.cs`: API endpoint, middleware, authentication, authorization 설정
 - `Domain/Entities.cs`: 핵심 도메인 enum 및 entity
 - `Domain/Dtos.cs`: API request/response DTO
-- `Infrastructure/InMemorySalesRepository.cs`: 현재 데이터 저장소
+- `Infrastructure/SqliteSalesRepository.cs`: 현재 EF Core SQLite 데이터 저장소
+- `Infrastructure/SalesDbContext.cs`: EF Core DbContext 및 SQLite table mapping
+- `Infrastructure/SalesDbInitializer.cs`: SQLite DB 생성 및 기본 계정/그룹 seed
+- `Infrastructure/FieldSalesHealthChecks.cs`: `/health`용 SQLite 및 upload directory 상태 점검
+- `Infrastructure/InMemorySalesRepository.cs`: 이전 in-memory 구현, 참고용
+- `Services/RealAbrLookupClient.cs`: 실제 ABR Lookup API 전환 준비용 client
 - `wwwroot/app.js`: 대부분의 프론트엔드 상태 관리, API 호출, Google Map, XML Import/Export 로직
 - `wwwroot/index.html`: 앱 화면 구조
 - `wwwroot/app.css`: UI 스타일
@@ -505,26 +518,32 @@ wwwroot/uploads/sales-notes/yyyyMMdd/
 
 현재:
 
-- `InMemorySalesRepository`
-- 앱 재시작 시 데이터 초기화
+- `SqliteSalesRepository`
+- EF Core SQLite 기반 영속 저장소
+- 기본 connection string: `ConnectionStrings:SalesDb`
+- 기본 DB 파일: `App_Data/ecnesoft-sales.db`
+- 앱 시작 시 `SalesDbInitializer`가 `EnsureCreated`를 수행하고 기본 ADMIN/SALES 계정 및 ClientGroups를 seed합니다.
+
+현재 DI 등록:
+
+```csharp
+builder.Services.AddDbContext<SalesDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("SalesDb")));
+
+builder.Services.AddScoped<ISalesRepository, SqliteSalesRepository>();
+```
+
+참고:
+
+```text
+Docs/schema.sql
+```
 
 운영 권장:
 
-- EF Core 또는 ADO.NET 기반 DB 저장소로 교체
-- `Docs/schema.sql` 기준으로 SQLite 또는 SQL Server 테이블 생성
-- repository interface는 유지하고 구현체만 교체하는 방식 권장
-
-교체 대상:
-
-```text
-builder.Services.AddSingleton<ISalesRepository, InMemorySalesRepository>();
-```
-
-예:
-
-```csharp
-builder.Services.AddScoped<ISalesRepository, SqlSalesRepository>();
-```
+- SQLite 파일 백업 정책 수립
+- 운영 배포 시 EF Core migration 전략 추가
+- 대규모 운영에서는 같은 `ISalesRepository` 계약을 유지한 채 SQL Server 구현으로 교체 가능
 
 ## 15. 빌드와 검증
 
@@ -584,22 +603,28 @@ git push
 - Cookie `SecurePolicy`를 `Always`로 변경
 - Google Maps API key를 browser restricted key로 설정
 - Google Cloud Console에서 Maps JavaScript API 활성화
-- DB 저장소 적용
 - ABR Lookup 실제 API 적용
-- CSRF 대책 추가
 - 로그와 audit trail 추가
 - 관리자 계정 초기 비밀번호 변경
+- DB 백업/복구 정책 설정
+- refresh token cookie 운영 보안 옵션 점검
 
 권장:
 
 - 고객/게시글/그룹 삭제 audit
 - Import 결과 다운로드
-- 사용자 관리 화면
-- refresh token 또는 session rotation
 - 이미지 virus scan
-- rate limiting
 - structured logging
-- health check endpoint
+
+완료:
+
+- DB 영속화: EF Core SQLite `SqliteSalesRepository`
+- CSRF 대책: `X-CSRF-TOKEN` header 검증
+- 사용자 관리 화면: ADMIN 전용 `Users` 화면
+- refresh token 또는 session rotation: 7일 HTTP-only refresh token
+- rate limiting: login 10/min/IP, refresh 20/min/IP, general API 200/min/user
+- health check endpoint: public `GET /health` with SQLite/upload directory checks
+- ABR Lookup client 전환 준비: default mock 유지, `RealAbrLookupClient` 추가
 
 ## 18. 자주 생기는 문제
 
@@ -621,10 +646,6 @@ git push
 - 필수값이 빠지지 않았는지
 - Latitude, Longitude가 숫자인지
 
-### 앱 재시작 후 데이터가 사라짐
-
-정상 동작입니다. 현재 저장소는 in-memory입니다. 운영에서는 DB 저장소로 교체해야 합니다.
-
 ### 401 또는 403
 
 확인:
@@ -636,10 +657,9 @@ git push
 
 ## 19. 다음 개발 우선순위
 
-1. DB 영속화 구현
-2. 사용자 관리 화면 추가
-3. Customer XML Import 결과 상세 리포트 추가
-4. 운영용 ABR Lookup client 교체
-5. CSRF 및 rate limiting 추가
-6. 게시글 이미지 교체/삭제 세부 기능 추가
-7. 테스트 프로젝트 추가
+1. audit trail 추가
+2. Customer XML Import 결과 다운로드 기능 추가
+3. 게시글 이미지 교체/삭제 세부 기능 추가
+4. 테스트 프로젝트 추가
+5. structured logging 개선
+6. 이미지 virus scan 적용

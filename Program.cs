@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using EcnesoftFieldSales.Auth;
 using EcnesoftFieldSales.Domain;
 using EcnesoftFieldSales.Infrastructure;
@@ -10,7 +11,9 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 const string CsrfHeaderName = "X-CSRF-TOKEN";
 const string RefreshCookieName = "EcnesoftSales.Refresh";
@@ -31,12 +34,82 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddDbContext<SalesDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("SalesDb") ?? "Data Source=App_Data/ecnesoft-sales.db"));
+// Swap MockAbrLookupClient to RealAbrLookupClient here when the production ABR API key is configured.
 builder.Services.AddHttpClient<IAbrLookupClient, MockAbrLookupClient>();
 builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<ISalesRepository, SqliteSalesRepository>();
 builder.Services.AddSingleton<IImportParser, ImportParser>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services
+    .AddHealthChecks()
+    .AddCheck<SqliteHealthCheck>("sqlite")
+    .AddCheck<UploadDirectoryHealthCheck>("uploads");
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter = Math.Ceiling(retryAfter.TotalSeconds).ToString();
+        }
+
+        context.HttpContext.Response.ContentType = "application/problem+json";
+        await context.HttpContext.Response.WriteAsJsonAsync(new ProblemDetails
+        {
+            Status = StatusCodes.Status429TooManyRequests,
+            Title = "Too many requests",
+            Detail = "Please wait before sending more requests."
+        }, cancellationToken);
+    };
+
+    options.AddPolicy("LoginLimiter", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            GetRemoteIpKey(context),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
+    options.AddPolicy("RefreshLimiter", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            GetRemoteIpKey(context),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        if (!context.Request.Path.StartsWithSegments("/api") ||
+            context.Request.Path.StartsWithSegments("/api/auth/login") ||
+            context.Request.Path.StartsWithSegments("/api/auth/refresh"))
+        {
+            return RateLimitPartition.GetNoLimiter("non-general-api");
+        }
+
+        var key = context.User.Identity?.IsAuthenticated == true
+            ? $"user:{context.User.GetUserId()}"
+            : $"ip:{GetRemoteIpKey(context)}";
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            key,
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 200,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            });
+    });
+});
 
 builder.Services
     .AddAuthentication(options =>
@@ -125,6 +198,7 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 app.UseAuthentication();
+app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
     if (RequiresCsrfValidation(context))
@@ -223,7 +297,8 @@ app.MapPost("/api/auth/login", async (
             expiresAt,
             CreateCsrfToken(httpContext, antiforgery)));
     })
-    .AllowAnonymous();
+    .AllowAnonymous()
+    .RequireRateLimiting("LoginLimiter");
 
 app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
         Results.Ok(user.ToProfile()))
@@ -289,6 +364,30 @@ app.MapPost("/api/auth/refresh", async (
             accessToken,
             expiresAt,
             CreateCsrfToken(httpContext, antiforgery)));
+    })
+    .AllowAnonymous()
+    .RequireRateLimiting("RefreshLimiter");
+
+app.MapGet("/health", async (HealthCheckService healthCheckService, CancellationToken cancellationToken) =>
+    {
+        var report = await healthCheckService.CheckHealthAsync(cancellationToken);
+        var checks = report.Entries.ToDictionary(
+            entry => entry.Key,
+            entry => new
+            {
+                status = entry.Value.Status == HealthStatus.Healthy ? "healthy" : "degraded",
+                description = entry.Value.Description,
+                durationMs = Math.Round(entry.Value.Duration.TotalMilliseconds, 2)
+            });
+        var isHealthy = report.Status == HealthStatus.Healthy;
+
+        return Results.Json(
+            new
+            {
+                status = isHealthy ? "healthy" : "degraded",
+                checks
+            },
+            statusCode: isHealthy ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
     })
     .AllowAnonymous();
 
@@ -1075,6 +1174,9 @@ static bool RequiresCsrfValidation(HttpContext context)
     var authorization = context.Request.Headers.Authorization.ToString();
     return !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase);
 }
+
+static string GetRemoteIpKey(HttpContext context) =>
+    context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
 static string CreateCsrfToken(HttpContext httpContext, IAntiforgery antiforgery) =>
     antiforgery.GetAndStoreTokens(httpContext).RequestToken ?? "";
