@@ -21,7 +21,9 @@ const state = {
     map: null,
     infoWindow: null,
     AdvancedMarkerElement: null,
+    Autocomplete: null,
     geocoder: null,
+    addressAutocomplete: null,
     previewMarker: null,
     markers: new globalThis.Map()
   },
@@ -192,6 +194,7 @@ function bindEvents() {
   $("#openNewButton").addEventListener("click", openNewCustomerModal);
   $("#newCustomerForm").addEventListener("submit", createCustomer);
   $("#newCustomerType").addEventListener("change", toggleTerminationFields);
+  $("#googleAddressLookupButton").addEventListener("click", lookupAddressWithGoogle);
   ["address", "city", "state", "postcode"].forEach((name) => {
     $("#newCustomerForm").elements[name].addEventListener("blur", syncAddressFieldsFromCurrentForm);
   });
@@ -486,9 +489,35 @@ async function initializeMapProvider() {
     $("#mapCanvas").hidden = true;
     $("#mapProviderStatus").textContent = "Google Maps";
     updateGoogleZoomLabel();
+    await initializeGoogleAddressEngine();
   } catch (error) {
     console.warn("Google Maps could not be loaded.", error);
     useInternalMap("Internal map - Google Maps failed to load");
+  }
+}
+
+async function initializeGoogleAddressEngine() {
+  if (!state.google.enabled || state.google.addressAutocomplete) {
+    return;
+  }
+
+  try {
+    const { Autocomplete } = await google.maps.importLibrary("places");
+    state.google.Autocomplete = Autocomplete;
+    const addressInput = $("#newCustomerForm").elements.address;
+    addressInput.setAttribute("autocomplete", "off");
+    state.google.addressAutocomplete = new Autocomplete(addressInput, {
+      componentRestrictions: { country: "au" },
+      fields: ["address_components", "formatted_address", "geometry", "name"],
+      types: ["address"]
+    });
+    state.google.addressAutocomplete.addListener("place_changed", () => {
+      const place = state.google.addressAutocomplete.getPlace();
+      applyGoogleAddressResult(place, "Google address selected.");
+    });
+  } catch (error) {
+    console.warn("Google Places address engine could not be loaded.", error);
+    $("#geocodeStatus").textContent = "Google address engine is unavailable. Enter Latitude and Longitude manually.";
   }
 }
 
@@ -533,6 +562,8 @@ function useInternalMap(message) {
   state.google.enabled = false;
   state.google.map = null;
   state.google.geocoder = null;
+  state.google.Autocomplete = null;
+  state.google.addressAutocomplete = null;
   state.google.markers.clear();
   $("#googleMapCanvas").hidden = true;
   $("#mapCanvas").hidden = false;
@@ -1067,6 +1098,102 @@ function readManualCoordinates(data, options = {}) {
   }
 
   return { valid: true, latitude, longitude };
+}
+
+async function lookupAddressWithGoogle() {
+  const form = $("#newCustomerForm");
+  const status = $("#geocodeStatus");
+
+  if (!state.google.enabled || !state.google.geocoder) {
+    status.textContent = "Google address lookup is unavailable. Enter Latitude and Longitude manually.";
+    return;
+  }
+
+  syncParsedAddressToForm(parseAddressInput(new FormData(form)));
+  const parsed = parseAddressInput(new FormData(form));
+  const variants = addressVariants(parsed);
+  if (variants.length === 0) {
+    status.textContent = "Enter an address before using Google Address.";
+    return;
+  }
+
+  status.textContent = "Finding address with Google...";
+  let lastStatus = "";
+  for (const address of variants) {
+    try {
+      const results = await geocodeWithStatus({
+        address,
+        componentRestrictions: { country: "AU" },
+        region: "AU"
+      });
+      applyGoogleAddressResult(results[0], "Google address matched.");
+      return;
+    } catch (error) {
+      lastStatus = error.message || "Google address lookup failed.";
+    }
+  }
+
+  status.textContent = `Google address lookup failed (${lastStatus}). Enter Latitude and Longitude manually.`;
+}
+
+function applyGoogleAddressResult(result, message) {
+  const location = result?.geometry?.location;
+  if (!location) {
+    $("#geocodeStatus").textContent = "Google address did not include coordinates.";
+    return false;
+  }
+
+  const form = $("#newCustomerForm");
+  const components = result.address_components || [];
+  const street = buildStreetAddress(components, result.name || "");
+  const suburb = addressComponent(components, ["locality", "postal_town", "sublocality_level_1", "administrative_area_level_2"]);
+  const stateName = addressComponent(components, ["administrative_area_level_1"], "short_name");
+  const postcode = addressComponent(components, ["postal_code"]);
+  const geocode = {
+    latitude: Number(location.lat().toFixed(7)),
+    longitude: Number(location.lng().toFixed(7)),
+    message
+  };
+
+  if (street) {
+    setFormValue(form, "address", street);
+  }
+  if (suburb) {
+    setFormValue(form, "city", suburb);
+  }
+  if (stateName) {
+    setFormValue(form, "state", stateName.toUpperCase());
+  }
+  if (postcode) {
+    setFormValue(form, "postcode", postcode);
+  }
+
+  updateCalculatedCoordinateFields(geocode);
+  showAddressPreviewOnMap(geocode);
+  $("#geocodeStatus").textContent = `${message} Latitude ${formatCoordinate(geocode.latitude)}, Longitude ${formatCoordinate(geocode.longitude)}.`;
+  return true;
+}
+
+function buildStreetAddress(components, fallbackName) {
+  const subpremise = addressComponent(components, ["subpremise"], "short_name");
+  const streetNumber = addressComponent(components, ["street_number"], "short_name");
+  const route = addressComponent(components, ["route"], "short_name");
+  const street = [streetNumber, route].filter(Boolean).join(" ").trim();
+
+  if (subpremise && street) {
+    return `${subpremise}/${street}`;
+  }
+  if (street) {
+    return street;
+  }
+  return fallbackName || "";
+}
+
+function addressComponent(components, types, name = "long_name") {
+  const typeList = Array.isArray(types) ? types : [types];
+  const match = components.find((component) =>
+    typeList.some((type) => component.types?.includes(type)));
+  return match?.[name] || "";
 }
 
 function syncParsedAddressToForm(parsed) {
@@ -1647,9 +1774,12 @@ function exportCustomerXmlTemplate() {
 }
 
 function buildCustomerTemplateXml() {
+  const customerRows = state.customers.map(customerXmlRow);
+  const blankRowCount = Math.max(10, 35 - customerRows.length);
   const rows = [
     customerXmlTemplateFields.map((field) => field.label),
-    ...Array.from({ length: 35 }, () => customerXmlTemplateFields.map(() => ""))
+    ...customerRows,
+    ...Array.from({ length: blankRowCount }, () => customerXmlTemplateFields.map(() => ""))
   ];
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -1670,6 +1800,26 @@ ${rows.map((row) => `      <Row>${row.map((cell) => `<Cell><Data ss:Type="String
   </Worksheet>
 </Workbook>
 `;
+}
+
+function customerXmlRow(customer) {
+  const values = {
+    companyName: customer.companyName,
+    type: customer.type,
+    terminationDate: customer.terminationDate || "",
+    terminationReason: customer.terminationReason || "",
+    competitor: customer.competitor || "",
+    abn: customer.abn || "",
+    address: customer.address,
+    city: customer.city,
+    state: customer.state,
+    postcode: customer.postcode,
+    latitude: formatCoordinate(customer.latitude),
+    longitude: formatCoordinate(customer.longitude),
+    generalNote: customer.generalNote || ""
+  };
+
+  return customerXmlTemplateFields.map((field) => values[field.key] ?? "");
 }
 
 function downloadTextFile(fileName, contents, mimeType) {
@@ -1694,13 +1844,31 @@ async function importCustomerXml(event) {
   setStatus("Importing customer XML...");
   try {
     const records = parseCustomerImportXml(await file.text());
+    const payloads = [];
+    const validationErrors = [];
+    records.forEach((record, index) => {
+      try {
+        payloads.push(buildCustomerImportPayload(record, index + 2));
+      } catch (error) {
+        validationErrors.push(`Row ${index + 2}: ${error.message}`);
+      }
+    });
+
+    if (payloads.length === 0) {
+      throw new Error("No valid customer rows were found in the XML file.");
+    }
+    if (validationErrors.length > 0) {
+      throw new Error(`Import cancelled. ${validationErrors.slice(0, 3).join(" ")}`);
+    }
+
     let inserted = 0;
     const errors = [];
     const importedTypes = new Set();
 
-    for (let index = 0; index < records.length; index += 1) {
+    const clearResult = await api("/api/customers", { method: "DELETE" });
+    for (let index = 0; index < payloads.length; index += 1) {
       try {
-        const payload = buildCustomerImportPayload(records[index], index + 1);
+        const payload = payloads[index];
         await api("/api/customers", {
           method: "POST",
           body: JSON.stringify(payload)
@@ -1719,7 +1887,9 @@ async function importCustomerXml(event) {
     renderCustomerTable();
     showView("customerView");
     const summary = `${inserted} customer${inserted === 1 ? "" : "s"} imported`;
-    setStatus(errors.length ? `${summary}. ${errors.slice(0, 3).join(" ")}` : `${summary}.`);
+    setStatus(errors.length
+      ? `${summary}. ${clearResult.deleted || 0} old customers deleted. ${errors.slice(0, 3).join(" ")}`
+      : `${summary}. ${clearResult.deleted || 0} old customers deleted.`);
   } catch (error) {
     setStatus(error.message || "XML import failed.");
   } finally {

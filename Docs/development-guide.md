@@ -15,6 +15,7 @@
 - 고객 Type 필터링: `ACTIVE`, `TERMINATION`, `CLOSED`, `PROSPECT`, `OWNERSHIP`
 - 고객 직접 등록 및 수정
 - Latitude, Longitude 직접 입력 기반 Google Map 매핑
+- Google Places/Geocoder 기반 주소 검색 및 좌표 자동 입력
 - 고객 Note 표시
 - Happy Visit 고객 그룹 관리
 - Dashboard 게시판 작성, 조회, 수정, 삭제
@@ -210,6 +211,7 @@ CompetitorType:
 | GET | `/api/customers` | ADMIN, SALES | 고객 목록 |
 | POST | `/api/customers` | ADMIN, SALES | 고객 생성 |
 | PUT | `/api/customers/{id}` | ADMIN, SALES | 고객 수정 |
+| DELETE | `/api/customers` | ADMIN, SALES | XML Import 교체용 고객 전체 삭제 |
 | PATCH | `/api/customers/{id}/coordinates` | ADMIN, SALES | 좌표 수정 |
 
 `POST /api/customers` 예시:
@@ -346,6 +348,8 @@ ETC: lime, E
 고객 등록:
 
 - Latitude, Longitude는 사용자가 직접 입력합니다.
+- Address 입력은 Google Places address autocomplete와 연결됩니다.
+- `Google Address` 버튼은 현재 주소 필드를 Google Geocoder로 조회해 Suburb, State, Postcode, Latitude, Longitude를 채웁니다.
 - 입력된 좌표로 Google Map preview marker가 이동합니다.
 - 저장 시 입력 좌표가 고객 좌표로 저장됩니다.
 
@@ -364,7 +368,8 @@ Customer 화면 상단
 - Excel에서 열 수 있는 XML Spreadsheet 형식
 - Sheet name: `Customer Import`
 - 1행은 헤더
-- 2행부터 고객 데이터 입력
+- Export 시 현재 저장된 Customer 데이터가 2행부터 채워집니다.
+- 2행부터 데이터를 수정하거나 새 row를 추가해 Import할 수 있습니다.
 
 헤더:
 
@@ -416,9 +421,13 @@ ETC
 Import 동작:
 
 - XML 파일을 브라우저에서 읽습니다.
+- XML 전체 row를 먼저 파싱/검증합니다.
+- 검증 성공 시 기존 Customer 데이터를 삭제합니다.
 - 각 row를 `/api/customers`로 등록합니다.
+- Import 완료 후에는 XML에 있는 새 Customer 데이터만 남습니다.
 - 성공한 고객의 Type 필터가 Customer 화면에서 자동 체크됩니다.
-- 일부 row가 실패해도 나머지 row는 계속 import합니다.
+- XML 검증 단계에서 오류가 있으면 기존 Customer 데이터는 삭제하지 않습니다.
+- 기존 데이터 삭제 이후 서버 저장 단계에서 일부 row가 실패하면 성공한 row만 남을 수 있으므로 status message를 확인해야 합니다.
 - 오류는 status message에 최대 3개까지 요약 표시합니다.
 
 주의:

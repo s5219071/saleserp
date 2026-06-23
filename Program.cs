@@ -330,6 +330,15 @@ app.MapPut("/api/customers/{id:int}", (
     })
     .RequireAuthorization("SalesOrAdmin");
 
+app.MapDelete("/api/customers", (
+        ClaimsPrincipal user,
+        ISalesRepository repository) =>
+    {
+        var deleted = repository.ClearCustomers(user);
+        return Results.Ok(new { deleted });
+    })
+    .RequireAuthorization("SalesOrAdmin");
+
 app.MapPatch("/api/customers/{id:int}/coordinates", (
         int id,
         CoordinateUpdateRequest request,

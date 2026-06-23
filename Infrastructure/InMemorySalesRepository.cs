@@ -15,6 +15,7 @@ public interface ISalesRepository
     Customer? FindCustomer(int id);
     Customer AddCustomer(Customer customer);
     Customer? UpdateCustomer(int id, Customer customer, ClaimsPrincipal principal);
+    int ClearCustomers(ClaimsPrincipal principal);
     (Customer Customer, bool WasUpdated) UpsertCustomerByAbn(Customer customer);
     bool UpdateCoordinates(int id, double latitude, double longitude, ClaimsPrincipal principal);
     SalesNote AddSalesNote(SalesNote note);
@@ -168,6 +169,37 @@ public sealed class InMemorySalesRepository : ISalesRepository
             existing.AssignedUserId = customer.AssignedUserId;
             SyncLegacyCustomerFields(existing);
             return existing;
+        }
+    }
+
+    public int ClearCustomers(ClaimsPrincipal principal)
+    {
+        lock (_sync)
+        {
+            var removableIds = ScopeCustomersForUser(principal, _customers)
+                .Select(customer => customer.Id)
+                .ToHashSet();
+
+            if (removableIds.Count == 0)
+            {
+                return 0;
+            }
+
+            _customers.RemoveAll(customer => removableIds.Contains(customer.Id));
+            _notes.RemoveAll(note => removableIds.Contains(note.CustomerId));
+            foreach (var group in _happyVisitGroups)
+            {
+                group.CustomerIds.RemoveAll(removableIds.Contains);
+            }
+            _happyVisitGroups.RemoveAll(group => group.CustomerIds.Count == 0);
+
+            if (_customers.Count == 0)
+            {
+                _nextCustomerId = 1;
+                _nextNoteId = 1;
+            }
+
+            return removableIds.Count;
         }
     }
 
